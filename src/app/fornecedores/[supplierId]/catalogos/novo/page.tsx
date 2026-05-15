@@ -66,9 +66,9 @@ export default async function NewCatalogPage({ params }: NewCatalogPageProps) {
                 required
               />
               <p className="text-xs text-muted-foreground">
-                Nesta fase, o sistema apenas salva o PDF e registra os metadados.
-                Extração de páginas vem depois.
-              </p>
+  Nesta fase, o sistema apenas salva o PDF e registra os metadados.
+  Extração de páginas vem depois. Limite atual: 100 MB.
+</p>
             </div>
 
             <div className="flex items-center gap-3">
