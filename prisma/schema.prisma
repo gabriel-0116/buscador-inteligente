@@ -23,7 +23,7 @@ enum RawProductStatus {
 
 model Supplier {
   id        String   @id @default(cuid())
-  name      String
+  name      String   @unique
   notes     String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -44,6 +44,8 @@ model Catalog {
 
   supplier Supplier      @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   pages    CatalogPage[]
+
+  @@index([supplierId])
 }
 
 model CatalogPage {
@@ -59,6 +61,7 @@ model CatalogPage {
   rawProducts RawProduct[]
 
   @@unique([catalogId, pageNumber])
+  @@index([catalogId])
 }
 
 model RawProduct {
@@ -78,6 +81,10 @@ model RawProduct {
   updatedAt              DateTime         @updatedAt
 
   catalogPage CatalogPage @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
+
+  @@index([catalogPageId])
+@@index([status])
+
 }
 
 model CanonicalProduct {
@@ -105,4 +112,7 @@ model SupplierOffer {
 
   supplier         Supplier         @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   canonicalProduct CanonicalProduct @relation(fields: [canonicalProductId], references: [id], onDelete: Cascade)
+
+  @@index([supplierId])
+@@index([canonicalProductId])
 }
