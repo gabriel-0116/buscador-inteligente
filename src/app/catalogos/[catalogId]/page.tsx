@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { notFound } from "next/navigation";
 import { getCatalogById } from "@/features/catalogs/queries";
 import {
@@ -54,8 +55,11 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           </p>
         </div>
 
-        <Button disabled>Processar páginas</Button>
-      </div>
+<form action={`/api/catalogs/${catalog.id}/process`} method="post">
+  <Button type="submit" disabled={catalog.status === "PROCESSING"}>
+    {catalog.status === "PROCESSING" ? "Processando..." : "Processar páginas"}
+  </Button>
+</form>      </div>
 
       <div className="grid gap-4 md:grid-cols-4">
         <Card>
@@ -158,8 +162,20 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
                 {catalog.pages.map((page) => (
                   <TableRow key={page.id}>
                     <TableCell>{page.pageNumber}</TableCell>
-                    <TableCell>{page.imageUrl || "-"}</TableCell>
-                    <TableCell>
+<TableCell>
+  {page.imageUrl ? (
+    <Image
+      src={`/api/catalog-pages/${page.id}/image`}
+      alt={`Página ${page.pageNumber}`}
+      width={120}
+      height={160}
+      unoptimized
+      className="rounded border object-contain"
+    />
+  ) : (
+    "-"
+  )}
+</TableCell>                    <TableCell>
                       {page.rawText ? "Texto extraído" : "-"}
                     </TableCell>
                     <TableCell>
