@@ -107,8 +107,13 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
                 {supplier.catalogs.map((catalog) => (
                   <TableRow key={catalog.id}>
                     <TableCell className="font-medium">
-                      {catalog.fileName}
-                    </TableCell>
+  <Link
+    href={`/catalogos/${catalog.id}`}
+    className="underline-offset-4 hover:underline"
+  >
+    {catalog.fileName}
+  </Link>
+</TableCell>
 
                     <TableCell>
                       <Badge variant="secondary">
