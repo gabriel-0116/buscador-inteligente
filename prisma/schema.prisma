@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum CatalogStatus {
+  DRAFT
+  PROCESSING
+  READY_FOR_REVIEW
+  REVIEWED
+  FAILED
+}
+
+enum RawProductStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  MERGED
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  name      String
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  catalogs Catalog[]
+  offers   SupplierOffer[]
+}
+
+model Catalog {
+  id           String        @id @default(cuid())
+  supplierId   String
+  fileName     String
+  fileUrl      String?
+  status       CatalogStatus @default(DRAFT)
+  pageCount    Int?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  supplier Supplier      @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  pages    CatalogPage[]
+}
+
+model CatalogPage {
+  id          String   @id @default(cuid())
+  catalogId   String
+  pageNumber  Int
+  imageUrl    String?
+  rawText     String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  catalog     Catalog      @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  rawProducts RawProduct[]
+
+  @@unique([catalogId, pageNumber])
+}
+
+model RawProduct {
+  id                   String           @id @default(cuid())
+  catalogPageId         String
+  originalText           String?
+  translatedNamePt       String?
+  translatedDescriptionPt String?
+  category               String?
+  code                   String?
+  brand                  String?
+  imageUrl               String?
+  boundingBox            Json?
+  status                 RawProductStatus @default(PENDING_REVIEW)
+  confidence             Float?
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
+
+  catalogPage CatalogPage @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
+}
+
+model CanonicalProduct {
+  id            String   @id @default(cuid())
+  namePt        String
+  descriptionPt String?
+  category      String?
+  function      String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  offers SupplierOffer[]
+}
+
+model SupplierOffer {
+  id                 String   @id @default(cuid())
+  supplierId          String
+  canonicalProductId  String
+  supplierProductName String?
+  supplierCode        String?
+  catalogReference    String?
+  confidence          Float?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  supplier         Supplier         @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  canonicalProduct CanonicalProduct @relation(fields: [canonicalProductId], references: [id], onDelete: Cascade)
+}
