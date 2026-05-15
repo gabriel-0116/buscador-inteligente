@@ -7,3 +7,18 @@ export async function getSuppliers() {
     },
   });
 }
+
+export async function getSupplierById(id: string) {
+  return prisma.supplier.findUnique({
+    where: {
+      id,
+    },
+    include: {
+      catalogs: {
+        orderBy: {
+          createdAt: "desc",
+        },
+      },
+    },
+  });
+}

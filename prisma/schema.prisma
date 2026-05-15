@@ -33,29 +33,33 @@ model Supplier {
 }
 
 model Catalog {
-  id           String        @id @default(cuid())
-  supplierId   String
-  fileName     String
-  fileUrl      String?
-  status       CatalogStatus @default(DRAFT)
-  pageCount    Int?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
+  id         String        @id @default(cuid())
+  supplierId String
+  fileName   String
+  filePath   String?
+  fileUrl    String?
+  fileSize   Int?
+  mimeType   String?
+  status     CatalogStatus @default(DRAFT)
+  pageCount  Int?
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
 
   supplier Supplier      @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   pages    CatalogPage[]
 
   @@index([supplierId])
+  @@index([status])
 }
 
 model CatalogPage {
-  id          String   @id @default(cuid())
-  catalogId   String
-  pageNumber  Int
-  imageUrl    String?
-  rawText     String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(cuid())
+  catalogId  String
+  pageNumber Int
+  imageUrl   String?
+  rawText    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   catalog     Catalog      @relation(fields: [catalogId], references: [id], onDelete: Cascade)
   rawProducts RawProduct[]
@@ -65,26 +69,25 @@ model CatalogPage {
 }
 
 model RawProduct {
-  id                   String           @id @default(cuid())
-  catalogPageId         String
-  originalText           String?
-  translatedNamePt       String?
+  id                      String           @id @default(cuid())
+  catalogPageId           String
+  originalText            String?
+  translatedNamePt        String?
   translatedDescriptionPt String?
-  category               String?
-  code                   String?
-  brand                  String?
-  imageUrl               String?
-  boundingBox            Json?
-  status                 RawProductStatus @default(PENDING_REVIEW)
-  confidence             Float?
-  createdAt              DateTime         @default(now())
-  updatedAt              DateTime         @updatedAt
+  category                String?
+  code                    String?
+  brand                   String?
+  imageUrl                String?
+  boundingBox             Json?
+  status                  RawProductStatus @default(PENDING_REVIEW)
+  confidence              Float?
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
 
   catalogPage CatalogPage @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
 
   @@index([catalogPageId])
-@@index([status])
-
+  @@index([status])
 }
 
 model CanonicalProduct {
@@ -100,7 +103,7 @@ model CanonicalProduct {
 }
 
 model SupplierOffer {
-  id                 String   @id @default(cuid())
+  id                  String   @id @default(cuid())
   supplierId          String
   canonicalProductId  String
   supplierProductName String?
@@ -114,5 +117,5 @@ model SupplierOffer {
   canonicalProduct CanonicalProduct @relation(fields: [canonicalProductId], references: [id], onDelete: Cascade)
 
   @@index([supplierId])
-@@index([canonicalProductId])
+  @@index([canonicalProductId])
 }

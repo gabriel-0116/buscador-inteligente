@@ -58,8 +58,13 @@ export default async function SuppliersPage() {
                 {suppliers.map((supplier) => (
                   <TableRow key={supplier.id}>
                     <TableCell className="font-medium">
-                      {supplier.name}
-                    </TableCell>
+  <Link
+    href={`/fornecedores/${supplier.id}`}
+    className="underline-offset-4 hover:underline"
+  >
+    {supplier.name}
+  </Link>
+</TableCell>
                     <TableCell>{supplier.notes || "-"}</TableCell>
                     <TableCell>
                       {new Intl.DateTimeFormat("pt-BR").format(
