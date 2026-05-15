@@ -108,6 +108,7 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.redirect(
-    new URL(`/fornecedores/${supplierId}`, request.url)
-  );
+  new URL(`/fornecedores/${supplierId}`, request.url),
+  303
+);
 }

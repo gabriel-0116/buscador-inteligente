@@ -55,11 +55,20 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           </p>
         </div>
 
-<form action={`/api/catalogs/${catalog.id}/process`} method="post">
-  <Button type="submit" disabled={catalog.status === "PROCESSING"}>
-    {catalog.status === "PROCESSING" ? "Processando..." : "Processar páginas"}
-  </Button>
-</form>      </div>
+<div className="flex items-center gap-3">
+  <form action={`/api/catalogs/${catalog.id}/process`} method="post">
+    <Button type="submit" disabled={catalog.status === "PROCESSING"}>
+      {catalog.status === "PROCESSING" ? "Processando..." : "Processar páginas"}
+    </Button>
+  </form>
+
+  <form action={`/api/catalogs/${catalog.id}/delete`} method="post">
+    <Button type="submit" variant="destructive">
+      Excluir catálogo
+    </Button>
+  </form>
+</div> 
+</div>
 
       <div className="grid gap-4 md:grid-cols-4">
         <Card>

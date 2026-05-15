@@ -19,8 +19,9 @@ export async function POST(
     await processCatalogPages(catalogId);
 
     return NextResponse.redirect(
-      new URL(`/catalogos/${catalogId}`, request.url)
-    );
+  new URL(`/catalogos/${catalogId}`, request.url),
+  303
+);
   } catch (error) {
     console.error(error);
 

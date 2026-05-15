@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getSupplierById } from "@/features/suppliers/queries";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -9,42 +8,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 
-type SupplierPageProps = {
+type NewCatalogPageProps = {
   params: Promise<{
     supplierId: string;
   }>;
 };
 
-function formatBytes(bytes: number | null) {
-  if (!bytes) return "-";
-
-  const mb = bytes / 1024 / 1024;
-
-  return `${mb.toFixed(2)} MB`;
-}
-
-function formatStatus(status: string) {
-  const labels: Record<string, string> = {
-    DRAFT: "Rascunho",
-    PROCESSING: "Processando",
-    READY_FOR_REVIEW: "Pronto para revisão",
-    REVIEWED: "Revisado",
-    FAILED: "Falhou",
-  };
-
-  return labels[status] ?? status;
-}
-
-export default async function SupplierPage({ params }: SupplierPageProps) {
+export default async function NewCatalogPage({ params }: NewCatalogPageProps) {
   const { supplierId } = await params;
 
   const supplier = await getSupplierById(supplierId);
@@ -54,87 +27,58 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
   }
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <Button variant="ghost" asChild className="mb-3 px-0">
-            <Link href="/fornecedores">← Voltar para fornecedores</Link>
-          </Button>
-
-          <h1 className="text-2xl font-semibold">{supplier.name}</h1>
-
-          {supplier.notes ? (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {supplier.notes}
-            </p>
-          ) : (
-            <p className="mt-1 text-sm text-muted-foreground">
-              Sem observações cadastradas.
-            </p>
-          )}
-        </div>
-
-        <Button asChild>
-          <Link href={`/fornecedores/${supplier.id}/catalogos/novo`}>
-            Enviar PDF
+    <main className="mx-auto flex max-w-3xl flex-col gap-6 p-6">
+      <div>
+        <Button variant="ghost" asChild className="mb-3 px-0">
+          <Link href={`/fornecedores/${supplier.id}`}>
+            ← Voltar para fornecedor
           </Link>
         </Button>
+
+        <h1 className="text-2xl font-semibold">Enviar catálogo em PDF</h1>
+
+        <p className="text-sm text-muted-foreground">
+          Fornecedor: {supplier.name}
+        </p>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Catálogos em PDF</CardTitle>
+          <CardTitle>Arquivo do catálogo</CardTitle>
         </CardHeader>
 
         <CardContent>
-          {supplier.catalogs.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
-              Nenhum catálogo enviado para este fornecedor ainda.
+          <form
+            action="/api/catalogs"
+            method="post"
+            encType="multipart/form-data"
+            className="flex flex-col gap-5"
+          >
+            <input type="hidden" name="supplierId" value={supplier.id} />
+
+            <div className="grid gap-2">
+              <Label htmlFor="file">PDF do catálogo</Label>
+              <Input
+                id="file"
+                name="file"
+                type="file"
+                accept="application/pdf,.pdf"
+                required
+              />
+              <p className="text-xs text-muted-foreground">
+                Nesta fase, o sistema apenas salva o PDF e registra os
+                metadados. Extração de páginas vem depois. Limite atual: 100 MB.
+              </p>
             </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Arquivo</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Tamanho</TableHead>
-                  <TableHead>Páginas</TableHead>
-                  <TableHead>Enviado em</TableHead>
-                </TableRow>
-              </TableHeader>
 
-              <TableBody>
-                {supplier.catalogs.map((catalog) => (
-                  <TableRow key={catalog.id}>
-                    <TableCell className="font-medium">
-  <Link
-    href={`/catalogos/${catalog.id}`}
-    className="underline-offset-4 hover:underline"
-  >
-    {catalog.fileName}
-  </Link>
-</TableCell>
+            <div className="flex items-center gap-3">
+              <Button type="submit">Salvar catálogo</Button>
 
-                    <TableCell>
-                      <Badge variant="secondary">
-                        {formatStatus(catalog.status)}
-                      </Badge>
-                    </TableCell>
-
-                    <TableCell>{formatBytes(catalog.fileSize)}</TableCell>
-
-                    <TableCell>{catalog.pageCount ?? "-"}</TableCell>
-
-                    <TableCell>
-                      {new Intl.DateTimeFormat("pt-BR").format(
-                        catalog.createdAt
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
+              <Button variant="outline" asChild>
+                <Link href={`/fornecedores/${supplier.id}`}>Cancelar</Link>
+              </Button>
+            </div>
+          </form>
         </CardContent>
       </Card>
     </main>
