@@ -17,7 +17,7 @@ function resolveProjectPath(path: string) {
 
 export async function GET(
   _request: NextRequest,
-  context: CatalogPageImageRouteContext
+  context: CatalogPageImageRouteContext,
 ) {
   const { pageId } = await context.params;
 
@@ -37,7 +37,7 @@ export async function GET(
       },
       {
         status: 404,
-      }
+      },
     );
   }
 

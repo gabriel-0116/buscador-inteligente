@@ -11,7 +11,7 @@ type ProcessCatalogRouteContext = {
 
 export async function POST(
   request: NextRequest,
-  context: ProcessCatalogRouteContext
+  context: ProcessCatalogRouteContext,
 ) {
   const { catalogId } = await context.params;
 
@@ -19,9 +19,9 @@ export async function POST(
     await processCatalogPages(catalogId);
 
     return NextResponse.redirect(
-  new URL(`/catalogos/${catalogId}`, request.url),
-  303
-);
+      new URL(`/catalogos/${catalogId}`, request.url),
+      303,
+    );
   } catch (error) {
     console.error(error);
 
@@ -31,7 +31,7 @@ export async function POST(
       },
       {
         status: 500,
-      }
+      },
     );
   }
 }

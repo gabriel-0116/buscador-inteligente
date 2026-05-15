@@ -3,12 +3,7 @@ import { notFound } from "next/navigation";
 import { getSupplierById } from "@/features/suppliers/queries";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -107,13 +102,13 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
                 {supplier.catalogs.map((catalog) => (
                   <TableRow key={catalog.id}>
                     <TableCell className="font-medium">
-  <Link
-    href={`/catalogos/${catalog.id}`}
-    className="underline-offset-4 hover:underline"
-  >
-    {catalog.fileName}
-  </Link>
-</TableCell>
+                      <Link
+                        href={`/catalogos/${catalog.id}`}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {catalog.fileName}
+                      </Link>
+                    </TableCell>
 
                     <TableCell>
                       <Badge variant="secondary">
@@ -127,7 +122,7 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
 
                     <TableCell>
                       {new Intl.DateTimeFormat("pt-BR").format(
-                        catalog.createdAt
+                        catalog.createdAt,
                       )}
                     </TableCell>
                   </TableRow>

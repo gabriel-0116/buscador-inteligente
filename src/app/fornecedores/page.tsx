@@ -1,12 +1,7 @@
 import Link from "next/link";
 import { getSuppliers } from "@/features/suppliers/queries";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -58,17 +53,17 @@ export default async function SuppliersPage() {
                 {suppliers.map((supplier) => (
                   <TableRow key={supplier.id}>
                     <TableCell className="font-medium">
-  <Link
-    href={`/fornecedores/${supplier.id}`}
-    className="underline-offset-4 hover:underline"
-  >
-    {supplier.name}
-  </Link>
-</TableCell>
+                      <Link
+                        href={`/fornecedores/${supplier.id}`}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {supplier.name}
+                      </Link>
+                    </TableCell>
                     <TableCell>{supplier.notes || "-"}</TableCell>
                     <TableCell>
                       {new Intl.DateTimeFormat("pt-BR").format(
-                        supplier.createdAt
+                        supplier.createdAt,
                       )}
                     </TableCell>
                   </TableRow>

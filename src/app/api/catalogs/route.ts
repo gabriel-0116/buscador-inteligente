@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
   if (!supplierId) {
     return NextResponse.json(
       { error: "Fornecedor é obrigatório." },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -41,28 +41,25 @@ export async function POST(request: NextRequest) {
   if (!supplier) {
     return NextResponse.json(
       { error: "Fornecedor não encontrado." },
-      { status: 404 }
+      { status: 404 },
     );
   }
 
   if (!(file instanceof File)) {
     return NextResponse.json(
       { error: "Arquivo PDF é obrigatório." },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
   if (file.size === 0) {
-    return NextResponse.json(
-      { error: "Arquivo vazio." },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Arquivo vazio." }, { status: 400 });
   }
 
   if (file.size > MAX_FILE_SIZE) {
     return NextResponse.json(
       { error: "Arquivo muito grande. Limite atual: 100 MB." },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -73,7 +70,7 @@ export async function POST(request: NextRequest) {
   if (!isPdf) {
     return NextResponse.json(
       { error: "Envie apenas arquivos PDF." },
-      { status: 400 }
+      { status: 400 },
     );
   }
 
@@ -108,7 +105,7 @@ export async function POST(request: NextRequest) {
   });
 
   return NextResponse.redirect(
-  new URL(`/fornecedores/${supplierId}`, request.url),
-  303
-);
+    new URL(`/fornecedores/${supplierId}`, request.url),
+    303,
+  );
 }
