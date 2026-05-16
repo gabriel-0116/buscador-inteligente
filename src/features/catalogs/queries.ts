@@ -36,7 +36,7 @@ export async function getCatalogPageById(id: string) {
       },
       rawProducts: {
         orderBy: {
-          createdAt: "desc",
+          createdAt: "asc",
         },
       },
     },
