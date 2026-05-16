@@ -55,12 +55,14 @@ export default async function ExtractedPagePage({
           </Button>
         </form>
 
-        <form
-          action={`/api/catalog-pages/${page.id}/extract-products`}
-          method="post"
-        >
-          <Button type="submit">Extrair produtos desta página</Button>
-        </form>
+        {page.rawProducts.some((product) => product.imageUrl) ? (
+          <form
+            action={`/api/catalog-pages/${page.id}/ocr-cards`}
+            method="post"
+          >
+            <Button type="submit">Ler cards com OCR</Button>
+          </form>
+        ) : null}
       </div>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card>
@@ -125,6 +127,7 @@ export default async function ExtractedPagePage({
                   <TableHead>Imagem</TableHead>
                   <TableHead>Nome</TableHead>
                   <TableHead>Código</TableHead>
+                  <TableHead>Marca</TableHead>
                   <TableHead>Categoria</TableHead>
                   <TableHead>Confiança</TableHead>
                   <TableHead>Status</TableHead>
@@ -152,6 +155,7 @@ export default async function ExtractedPagePage({
                       {product.translatedNamePt || "-"}
                     </TableCell>
                     <TableCell>{product.code || "-"}</TableCell>
+                    <TableCell>{product.brand || "-"}</TableCell>
                     <TableCell>{product.category || "-"}</TableCell>
                     <TableCell>
                       {product.confidence

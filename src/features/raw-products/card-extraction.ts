@@ -102,9 +102,6 @@ export async function generateRawProductCardsFromPage(pageId: string) {
   await prisma.rawProduct.deleteMany({
     where: {
       catalogPageId: page.id,
-      imageUrl: {
-        not: null,
-      },
     },
   });
 
