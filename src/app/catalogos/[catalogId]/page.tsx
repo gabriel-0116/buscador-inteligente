@@ -231,7 +231,7 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
                       ) : (
                         "-"
                       )}
-                    </TableCell>{" "}
+                    </TableCell>
                     <TableCell>
                       {page.rawText ? "Texto extraído" : "-"}
                     </TableCell>
