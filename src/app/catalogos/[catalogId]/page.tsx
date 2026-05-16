@@ -30,18 +30,38 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
     notFound();
   }
 
+  const pagesCount = catalog.pages.length;
+  const totalPageCount =
+    catalog.pageCount ?? (pagesCount > 0 ? pagesCount : null);
+
   const ocrPagesCount = catalog.pages.filter((page) => page.rawText).length;
 
-  const rawProductsCount = catalog.pages.reduce(
-    (total, page) => total + page.rawProducts.length,
-    0
-  );
+  const rawProducts = catalog.pages.flatMap((page) => page.rawProducts);
+
+  const rawProductsCount = rawProducts.length;
+
+  const pendingReviewCount = rawProducts.filter(
+    (product) => product.status === "PENDING_REVIEW"
+  ).length;
+
+  const approvedCount = rawProducts.filter(
+    (product) => product.status === "APPROVED"
+  ).length;
+
+  const rejectedCount = rawProducts.filter(
+    (product) => product.status === "REJECTED"
+  ).length;
 
   const supplierOffersCount = catalog.offers?.length ?? 0;
 
+  const hasPages = pagesCount > 0;
+  const hasRawProducts = rawProductsCount > 0;
+  const hasPendingReview = pendingReviewCount > 0;
+  const hasOffers = supplierOffersCount > 0;
+
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
           <Button variant="ghost" asChild className="mb-3 px-0">
             <Link href={`/fornecedores/${catalog.supplierId}`}>
@@ -56,56 +76,43 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
-          {catalog.pages.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-3">
+          {hasPages ? (
             <Button variant="outline" asChild>
               <Link href={`/catalogos/${catalog.id}/paginas`}>Ver páginas</Link>
             </Button>
           ) : null}
 
-          <form action={`/api/catalogs/${catalog.id}/process`} method="post">
-            <Button type="submit" disabled={catalog.status === "PROCESSING"}>
-              {catalog.status === "PROCESSING"
-                ? "Processando..."
-                : "Processar páginas"}
-            </Button>
-          </form>
-
-          {catalog.pages.length > 0 ? (
-            <form action={`/api/catalogs/${catalog.id}/ocr`} method="post">
-              <Button type="submit" variant="outline">
-                Executar OCR
+          {!hasPages ? (
+            <form action={`/api/catalogs/${catalog.id}/process`} method="post">
+              <Button type="submit" disabled={catalog.status === "PROCESSING"}>
+                {catalog.status === "PROCESSING"
+                  ? "Processando..."
+                  : "Processar páginas"}
               </Button>
             </form>
           ) : null}
 
-          {ocrPagesCount > 0 ? (
-            <form
-              action={`/api/catalogs/${catalog.id}/extract-products`}
-              method="post"
-            >
-              <Button type="submit" variant="outline">
-                Extrair produtos
-              </Button>
-            </form>
-          ) : null}
-
-          {catalog.pages.length > 0 ? (
+          {hasPages && !hasRawProducts ? (
             <form
               action={`/api/catalogs/${catalog.id}/extract-card-products`}
               method="post"
             >
-              <Button type="submit" variant="outline">
-                Extrair produtos do catálogo
-              </Button>
+              <Button type="submit">Extrair produtos do catálogo</Button>
             </form>
           ) : null}
 
-          {rawProductsCount > 0 ? (
-            <Button variant="outline" asChild>
+          {hasRawProducts ? (
+            <Button asChild>
               <Link href={`/catalogos/${catalog.id}/revisao`}>
                 Revisar produtos
               </Link>
+            </Button>
+          ) : null}
+
+          {hasOffers ? (
+            <Button variant="outline" asChild>
+              <Link href="/busca">Buscar produtos</Link>
             </Button>
           ) : null}
 
@@ -117,7 +124,7 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
         <Card>
           <CardHeader>
             <CardTitle className="text-sm font-medium">Status</CardTitle>
@@ -131,48 +138,145 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm font-medium">Tamanho</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-lg font-semibold">
-              {formatBytes(catalog.fileSize)}
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
             <CardTitle className="text-sm font-medium">Páginas</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-lg font-semibold">{catalog.pageCount ?? "-"}</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Ofertas do fornecedor</CardTitle>
-          </CardHeader>
-
-          <CardContent>
-            <p className="text-muted-foreground text-sm">
-              {supplierOffersCount} ofertas criadas a partir dos produtos
-              aprovados.
+            <p className="text-lg font-semibold">
+              {pagesCount}/{totalPageCount ?? "-"}
             </p>
+            <p className="text-muted-foreground text-xs">processadas</p>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm font-medium">Enviado em</CardTitle>
+            <CardTitle className="text-sm font-medium">OCR auxiliar</CardTitle>
           </CardHeader>
           <CardContent>
             <p className="text-lg font-semibold">
-              {new Intl.DateTimeFormat("pt-BR").format(catalog.createdAt)}
+              {ocrPagesCount}/{pagesCount}
+            </p>
+            <p className="text-muted-foreground text-xs">páginas com texto</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">
+              Produtos brutos
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-lg font-semibold">{rawProductsCount}</p>
+            <p className="text-muted-foreground text-xs">cards extraídos</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">Revisão</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-lg font-semibold">{pendingReviewCount}</p>
+            <p className="text-muted-foreground text-xs">
+              pendentes · {approvedCount} aprovados · {rejectedCount} rejeitados
             </p>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">Ofertas</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-lg font-semibold">{supplierOffersCount}</p>
+            <p className="text-muted-foreground text-xs">criadas para busca</p>
+          </CardContent>
+        </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Próxima ação</CardTitle>
+        </CardHeader>
+
+        <CardContent className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            {!hasPages ? (
+              <>
+                <p className="font-medium">Processar páginas do PDF</p>
+                <p className="text-muted-foreground text-sm">
+                  O catálogo ainda precisa ser convertido em imagens antes de
+                  extrair produtos.
+                </p>
+              </>
+            ) : !hasRawProducts ? (
+              <>
+                <p className="font-medium">Extrair produtos do catálogo</p>
+                <p className="text-muted-foreground text-sm">
+                  As páginas já existem. Agora gere os cards/produtos brutos
+                  para revisão.
+                </p>
+              </>
+            ) : hasPendingReview ? (
+              <>
+                <p className="font-medium">Revisar produtos pendentes</p>
+                <p className="text-muted-foreground text-sm">
+                  A extração automática só vira base confiável depois da
+                  aprovação humana.
+                </p>
+              </>
+            ) : hasOffers ? (
+              <>
+                <p className="font-medium">Buscar produtos aprovados</p>
+                <p className="text-muted-foreground text-sm">
+                  As ofertas já foram criadas. Agora valide se a busca textual
+                  encontra os produtos certos.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium">Revisar resultado da extração</p>
+                <p className="text-muted-foreground text-sm">
+                  Não existem pendências nem ofertas suficientes. Revise os
+                  produtos rejeitados ou extraia novamente.
+                </p>
+              </>
+            )}
+          </div>
+
+          {!hasPages ? (
+            <form action={`/api/catalogs/${catalog.id}/process`} method="post">
+              <Button type="submit" disabled={catalog.status === "PROCESSING"}>
+                {catalog.status === "PROCESSING"
+                  ? "Processando..."
+                  : "Processar páginas"}
+              </Button>
+            </form>
+          ) : !hasRawProducts ? (
+            <form
+              action={`/api/catalogs/${catalog.id}/extract-card-products`}
+              method="post"
+            >
+              <Button type="submit">Extrair produtos</Button>
+            </form>
+          ) : hasPendingReview ? (
+            <Button asChild>
+              <Link href={`/catalogos/${catalog.id}/revisao`}>
+                Ir para revisão
+              </Link>
+            </Button>
+          ) : hasOffers ? (
+            <Button asChild>
+              <Link href="/busca">Ir para busca</Link>
+            </Button>
+          ) : (
+            <Button variant="outline" asChild>
+              <Link href={`/catalogos/${catalog.id}/revisao`}>Ver revisão</Link>
+            </Button>
+          )}
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -197,32 +301,19 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
               <span className="text-muted-foreground">Tipo do arquivo</span>
               <span>{catalog.mimeType || "-"}</span>
             </div>
+
+            <div className="grid gap-1">
+              <span className="text-muted-foreground">Tamanho</span>
+              <span>{formatBytes(catalog.fileSize)}</span>
+            </div>
+
+            <div className="grid gap-1">
+              <span className="text-muted-foreground">Enviado em</span>
+              <span>
+                {new Intl.DateTimeFormat("pt-BR").format(catalog.createdAt)}
+              </span>
+            </div>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>OCR</CardTitle>
-        </CardHeader>
-
-        <CardContent>
-          <p className="text-muted-foreground text-sm">
-            {catalog.pages.filter((page) => page.rawText).length} de{" "}
-            {catalog.pages.length} páginas com texto bruto extraído.
-          </p>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Produtos brutos</CardTitle>
-        </CardHeader>
-
-        <CardContent>
-          <p className="text-muted-foreground text-sm">
-            {rawProductsCount} produtos brutos extraídos automaticamente.
-          </p>
         </CardContent>
       </Card>
 
@@ -234,8 +325,8 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
         <CardContent>
           {catalog.pages.length === 0 ? (
             <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
-              Nenhuma página extraída ainda. A próxima fase será converter este
-              PDF em imagens e criar registros em CatalogPage.
+              Nenhuma página extraída ainda. Primeiro processe o PDF para gerar
+              imagens das páginas.
             </div>
           ) : (
             <Table>
@@ -244,6 +335,7 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
                   <TableHead>Página</TableHead>
                   <TableHead>Imagem</TableHead>
                   <TableHead>Texto bruto</TableHead>
+                  <TableHead>Produtos brutos</TableHead>
                   <TableHead>Criada em</TableHead>
                 </TableRow>
               </TableHeader>
@@ -252,6 +344,7 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
                 {catalog.pages.map((page) => (
                   <TableRow key={page.id}>
                     <TableCell>{page.pageNumber}</TableCell>
+
                     <TableCell>
                       {page.imageUrl ? (
                         <Image
@@ -266,9 +359,13 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
                         "-"
                       )}
                     </TableCell>
+
                     <TableCell>
                       {page.rawText ? "Texto extraído" : "-"}
                     </TableCell>
+
+                    <TableCell>{page.rawProducts.length}</TableCell>
+
                     <TableCell>
                       {new Intl.DateTimeFormat("pt-BR").format(page.createdAt)}
                     </TableCell>

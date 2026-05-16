@@ -20,6 +20,7 @@ export async function getCatalogById(id: string) {
           rawProducts: {
             select: {
               id: true,
+              status: true,
             },
           },
         },
