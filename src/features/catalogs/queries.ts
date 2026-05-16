@@ -15,3 +15,18 @@ export async function getCatalogById(id: string) {
     },
   });
 }
+
+export async function getCatalogPageById(id: string) {
+  return prisma.catalogPage.findUnique({
+    where: {
+      id,
+    },
+    include: {
+      catalog: {
+        include: {
+          supplier: true,
+        },
+      },
+    },
+  });
+}

@@ -48,6 +48,12 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
         </div>
 
         <div className="flex items-center gap-3">
+          {catalog.pages.length > 0 ? (
+            <Button variant="outline" asChild>
+              <Link href={`/catalogos/${catalog.id}/paginas`}>Ver páginas</Link>
+            </Button>
+          ) : null}
+
           <form action={`/api/catalogs/${catalog.id}/process`} method="post">
             <Button type="submit" disabled={catalog.status === "PROCESSING"}>
               {catalog.status === "PROCESSING"
