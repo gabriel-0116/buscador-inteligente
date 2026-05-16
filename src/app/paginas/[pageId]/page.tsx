@@ -152,7 +152,12 @@ export default async function ExtractedPagePage({
                       )}
                     </TableCell>
                     <TableCell className="font-medium">
-                      {product.translatedNamePt || "-"}
+                      <Link
+                        href={`/produtos-brutos/${product.id}`}
+                        className="underline-offset-4 hover:underline"
+                      >
+                        {product.translatedNamePt || "Produto bruto"}
+                      </Link>
                     </TableCell>
                     <TableCell>{product.code || "-"}</TableCell>
                     <TableCell>{product.brand || "-"}</TableCell>

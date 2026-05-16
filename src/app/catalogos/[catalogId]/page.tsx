@@ -88,6 +88,14 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
             </form>
           ) : null}
 
+          {rawProductsCount > 0 ? (
+            <Button variant="outline" asChild>
+              <Link href={`/catalogos/${catalog.id}/revisao`}>
+                Revisar produtos
+              </Link>
+            </Button>
+          ) : null}
+
           <form action={`/api/catalogs/${catalog.id}/delete`} method="post">
             <Button type="submit" variant="destructive">
               Excluir catálogo

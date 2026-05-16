@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import sharp from "sharp";
 import { prisma } from "@/lib/prisma";
@@ -64,6 +64,35 @@ function generateApproximateProductCards(
   return boxes;
 }
 
+async function isMostlyBlankImage(imagePath: string) {
+  const { data, info } = await sharp(imagePath)
+    .resize(80, 80, {
+      fit: "inside",
+    })
+    .removeAlpha()
+    .raw()
+    .toBuffer({
+      resolveWithObject: true,
+    });
+
+  let brightPixels = 0;
+  const totalPixels = info.width * info.height;
+
+  for (let index = 0; index < data.length; index += 3) {
+    const red = data[index];
+    const green = data[index + 1];
+    const blue = data[index + 2];
+
+    if (red > 245 && green > 245 && blue > 245) {
+      brightPixels++;
+    }
+  }
+
+  const brightRatio = brightPixels / totalPixels;
+
+  return brightRatio > 0.92;
+}
+
 export async function generateRawProductCardsFromPage(pageId: string) {
   const page = await prisma.catalogPage.findUnique({
     where: {
@@ -71,7 +100,6 @@ export async function generateRawProductCardsFromPage(pageId: string) {
     },
     include: {
       catalog: true,
-      rawProducts: true,
     },
   });
 
@@ -95,14 +123,19 @@ export async function generateRawProductCardsFromPage(pageId: string) {
   const outputRelativeDir = join("raw-products", page.catalogId, page.id);
   const outputAbsoluteDir = join(process.cwd(), storageRoot, outputRelativeDir);
 
-  await mkdir(outputAbsoluteDir, {
-    recursive: true,
-  });
-
   await prisma.rawProduct.deleteMany({
     where: {
       catalogPageId: page.id,
     },
+  });
+
+  await rm(outputAbsoluteDir, {
+    recursive: true,
+    force: true,
+  });
+
+  await mkdir(outputAbsoluteDir, {
+    recursive: true,
   });
 
   const boxes = generateApproximateProductCards(
@@ -110,16 +143,19 @@ export async function generateRawProductCardsFromPage(pageId: string) {
     metadata.height
   );
 
-  const createdProducts = [];
+  let createdCount = 0;
 
   for (let index = 0; index < boxes.length; index++) {
     const box = boxes[index];
-    const cardNumber = index + 1;
-    const paddedCardNumber = String(cardNumber).padStart(2, "0");
-    const fileName = `card-${paddedCardNumber}.png`;
+    const temporaryCardNumber = index + 1;
+    const paddedTemporaryCardNumber = String(temporaryCardNumber).padStart(
+      2,
+      "0"
+    );
 
-    const outputRelativePath = join(outputRelativeDir, fileName);
-    const outputAbsolutePath = join(outputAbsoluteDir, fileName);
+    const temporaryFileName = `card-${paddedTemporaryCardNumber}.png`;
+    const temporaryRelativePath = join(outputRelativeDir, temporaryFileName);
+    const temporaryAbsolutePath = join(outputAbsoluteDir, temporaryFileName);
 
     await sharp(imagePath)
       .extract({
@@ -129,25 +165,35 @@ export async function generateRawProductCardsFromPage(pageId: string) {
         height: box.height,
       })
       .png()
-      .toFile(outputAbsolutePath);
+      .toFile(temporaryAbsolutePath);
 
-    const rawProduct = await prisma.rawProduct.create({
+    const isBlank = await isMostlyBlankImage(temporaryAbsolutePath);
+
+    if (isBlank) {
+      await rm(temporaryAbsolutePath, {
+        force: true,
+      });
+
+      continue;
+    }
+
+    createdCount++;
+
+    await prisma.rawProduct.create({
       data: {
         catalogPageId: page.id,
-        imageUrl: join(storageRoot, outputRelativePath),
+        imageUrl: join(storageRoot, temporaryRelativePath),
         boundingBox: box,
-        translatedNamePt: `Produto recortado ${cardNumber}`,
+        translatedNamePt: `Produto recortado ${createdCount}`,
         translatedDescriptionPt:
           "Card de produto recortado automaticamente. Revisar antes de aprovar.",
         status: "PENDING_REVIEW",
         confidence: 0.3,
       },
     });
-
-    createdProducts.push(rawProduct);
   }
 
   return {
-    created: createdProducts.length,
+    created: createdCount,
   };
 }
