@@ -27,6 +27,11 @@ export async function getCatalogPageById(id: string) {
           supplier: true,
         },
       },
+      rawProducts: {
+        orderBy: {
+          createdAt: "desc",
+        },
+      },
     },
   });
 }
