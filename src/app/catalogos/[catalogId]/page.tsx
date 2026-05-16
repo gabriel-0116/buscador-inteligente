@@ -42,7 +42,7 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
 
           <h1 className="text-2xl font-semibold">{catalog.fileName}</h1>
 
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="text-muted-foreground mt-1 text-sm">
             Fornecedor: {catalog.supplier.name}
           </p>
         </div>
@@ -61,6 +61,14 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
                 : "Processar páginas"}
             </Button>
           </form>
+
+          {catalog.pages.length > 0 ? (
+            <form action={`/api/catalogs/${catalog.id}/ocr`} method="post">
+              <Button type="submit" variant="outline">
+                Executar OCR
+              </Button>
+            </form>
+          ) : null}
 
           <form action={`/api/catalogs/${catalog.id}/delete`} method="post">
             <Button type="submit" variant="destructive">
@@ -123,12 +131,12 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           <div className="grid gap-3 text-sm">
             <div className="grid gap-1">
               <span className="text-muted-foreground">ID do catálogo</span>
-              <code className="rounded bg-muted px-2 py-1">{catalog.id}</code>
+              <code className="bg-muted rounded px-2 py-1">{catalog.id}</code>
             </div>
 
             <div className="grid gap-1">
               <span className="text-muted-foreground">Caminho local</span>
-              <code className="rounded bg-muted px-2 py-1">
+              <code className="bg-muted rounded px-2 py-1">
                 {catalog.filePath || "-"}
               </code>
             </div>
@@ -143,12 +151,25 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
 
       <Card>
         <CardHeader>
+          <CardTitle>OCR</CardTitle>
+        </CardHeader>
+
+        <CardContent>
+          <p className="text-muted-foreground text-sm">
+            {catalog.pages.filter((page) => page.rawText).length} de{" "}
+            {catalog.pages.length} páginas com texto bruto extraído.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Páginas extraídas</CardTitle>
         </CardHeader>
 
         <CardContent>
           {catalog.pages.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+            <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
               Nenhuma página extraída ainda. A próxima fase será converter este
               PDF em imagens e criar registros em CatalogPage.
             </div>

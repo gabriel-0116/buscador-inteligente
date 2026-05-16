@@ -31,11 +31,9 @@ export default async function ExtractedPagePage({
           </Link>
         </Button>
 
-        <h1 className="text-2xl font-semibold">
-          Página {page.pageNumber}
-        </h1>
+        <h1 className="text-2xl font-semibold">Página {page.pageNumber}</h1>
 
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="text-muted-foreground mt-1 text-sm">
           {page.catalog.fileName} · Fornecedor: {page.catalog.supplier.name}
         </p>
       </div>
@@ -62,7 +60,7 @@ export default async function ExtractedPagePage({
           <CardContent className="grid gap-4 text-sm">
             <div>
               <div className="text-muted-foreground">ID da página</div>
-              <code className="block rounded bg-muted px-2 py-1">
+              <code className="bg-muted block rounded px-2 py-1">
                 {page.id}
               </code>
             </div>
@@ -74,7 +72,14 @@ export default async function ExtractedPagePage({
 
             <div>
               <div className="text-muted-foreground">Texto bruto</div>
-              <div>{page.rawText ? "Texto extraído" : "Ainda não extraído"}</div>
+
+              {page.rawText ? (
+                <pre className="bg-muted mt-2 max-h-[500px] overflow-auto rounded p-3 text-xs whitespace-pre-wrap">
+                  {page.rawText}
+                </pre>
+              ) : (
+                <div>Ainda não extraído</div>
+              )}
             </div>
           </CardContent>
         </Card>
