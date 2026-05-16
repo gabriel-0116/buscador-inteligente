@@ -90,6 +90,17 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
             </form>
           ) : null}
 
+          {catalog.pages.length > 0 ? (
+            <form
+              action={`/api/catalogs/${catalog.id}/extract-card-products`}
+              method="post"
+            >
+              <Button type="submit" variant="outline">
+                Extrair produtos do catálogo
+              </Button>
+            </form>
+          ) : null}
+
           {rawProductsCount > 0 ? (
             <Button variant="outline" asChild>
               <Link href={`/catalogos/${catalog.id}/revisao`}>
