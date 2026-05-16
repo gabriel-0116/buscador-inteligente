@@ -27,19 +27,21 @@ export default async function CatalogPagesPage({
       <div className="flex items-start justify-between gap-4">
         <div>
           <Button variant="ghost" asChild className="mb-3 px-0">
-            <Link href={`/catalogos/${catalog.id}`}>← Voltar para catálogo</Link>
+            <Link href={`/catalogos/${catalog.id}`}>
+              ← Voltar para catálogo
+            </Link>
           </Button>
 
           <h1 className="text-2xl font-semibold">Páginas extraídas</h1>
 
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="text-muted-foreground mt-1 text-sm">
             {catalog.fileName} · {catalog.pages.length} páginas
           </p>
         </div>
       </div>
 
       {catalog.pages.length === 0 ? (
-        <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+        <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
           Nenhuma página extraída ainda.
         </div>
       ) : (

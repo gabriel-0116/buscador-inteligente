@@ -1,25 +1,25 @@
 import { NextRequest, NextResponse } from "next/server";
-import { processCatalogPages } from "@/features/catalogs/processing";
+import { generateRawProductCardsFromPage } from "@/features/raw-products/card-extraction";
 
 export const runtime = "nodejs";
 
-type ProcessCatalogRouteContext = {
+type GenerateCardsRouteContext = {
   params: Promise<{
-    catalogId: string;
+    pageId: string;
   }>;
 };
 
 export async function POST(
   request: NextRequest,
-  context: ProcessCatalogRouteContext
+  context: GenerateCardsRouteContext
 ) {
-  const { catalogId } = await context.params;
+  const { pageId } = await context.params;
 
   try {
-    await processCatalogPages(catalogId);
+    await generateRawProductCardsFromPage(pageId);
 
     return NextResponse.redirect(
-      new URL(`/catalogos/${catalogId}`, request.url),
+      new URL(`/paginas/${pageId}`, request.url),
       303
     );
   } catch (error) {
@@ -27,7 +27,7 @@ export async function POST(
 
     return NextResponse.json(
       {
-        error: "Erro ao processar páginas do catálogo.",
+        error: "Erro ao gerar recortes de produtos.",
       },
       {
         status: 500,

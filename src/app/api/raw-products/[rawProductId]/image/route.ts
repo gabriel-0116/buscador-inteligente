@@ -5,9 +5,9 @@ import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 
-type CatalogPageImageRouteContext = {
+type RawProductImageRouteContext = {
   params: Promise<{
-    pageId: string;
+    rawProductId: string;
   }>;
 };
 
@@ -17,23 +17,23 @@ function resolveProjectPath(path: string) {
 
 export async function GET(
   _request: NextRequest,
-  context: CatalogPageImageRouteContext
+  context: RawProductImageRouteContext
 ) {
-  const { pageId } = await context.params;
+  const { rawProductId } = await context.params;
 
-  const page = await prisma.catalogPage.findUnique({
+  const rawProduct = await prisma.rawProduct.findUnique({
     where: {
-      id: pageId,
+      id: rawProductId,
     },
     select: {
       imageUrl: true,
     },
   });
 
-  if (!page?.imageUrl) {
+  if (!rawProduct?.imageUrl) {
     return NextResponse.json(
       {
-        error: "Imagem da página não encontrada.",
+        error: "Imagem do produto bruto não encontrada.",
       },
       {
         status: 404,
@@ -41,7 +41,7 @@ export async function GET(
     );
   }
 
-  const imagePath = resolveProjectPath(page.imageUrl);
+  const imagePath = resolveProjectPath(rawProduct.imageUrl);
   const imageBuffer = await readFile(imagePath);
 
   return new NextResponse(new Uint8Array(imageBuffer), {

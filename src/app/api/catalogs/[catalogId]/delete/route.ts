@@ -26,7 +26,7 @@ async function safeRemove(path: string | null | undefined) {
 
 export async function POST(
   request: NextRequest,
-  context: DeleteCatalogRouteContext,
+  context: DeleteCatalogRouteContext
 ) {
   const { catalogId } = await context.params;
 
@@ -48,7 +48,7 @@ export async function POST(
       },
       {
         status: 404,
-      },
+      }
     );
   }
 
@@ -66,6 +66,6 @@ export async function POST(
 
   return NextResponse.redirect(
     new URL(`/fornecedores/${catalog.supplierId}`, request.url),
-    303,
+    303
   );
 }

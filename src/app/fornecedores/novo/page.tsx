@@ -11,7 +11,7 @@ export default function NewSupplierPage() {
     <main className="mx-auto flex max-w-3xl flex-col gap-6 p-6">
       <div>
         <h1 className="text-2xl font-semibold">Novo fornecedor</h1>
-        <p className="text-sm text-muted-foreground">
+        <p className="text-muted-foreground text-sm">
           Comece cadastrando os fornecedores. Depois cada PDF será vinculado a
           um fornecedor.
         </p>

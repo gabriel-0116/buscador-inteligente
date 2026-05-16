@@ -59,11 +59,11 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
           <h1 className="text-2xl font-semibold">{supplier.name}</h1>
 
           {supplier.notes ? (
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="text-muted-foreground mt-1 text-sm">
               {supplier.notes}
             </p>
           ) : (
-            <p className="mt-1 text-sm text-muted-foreground">
+            <p className="text-muted-foreground mt-1 text-sm">
               Sem observações cadastradas.
             </p>
           )}
@@ -83,7 +83,7 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
 
         <CardContent>
           {supplier.catalogs.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+            <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
               Nenhum catálogo enviado para este fornecedor ainda.
             </div>
           ) : (
@@ -122,7 +122,7 @@ export default async function SupplierPage({ params }: SupplierPageProps) {
 
                     <TableCell>
                       {new Intl.DateTimeFormat("pt-BR").format(
-                        catalog.createdAt,
+                        catalog.createdAt
                       )}
                     </TableCell>
                   </TableRow>

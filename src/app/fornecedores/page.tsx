@@ -19,7 +19,7 @@ export default async function SuppliersPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Fornecedores</h1>
-          <p className="text-sm text-muted-foreground">
+          <p className="text-muted-foreground text-sm">
             Cadastre os fornecedores antes de subir os catálogos em PDF.
           </p>
         </div>
@@ -36,7 +36,7 @@ export default async function SuppliersPage() {
 
         <CardContent>
           {suppliers.length === 0 ? (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
+            <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
               Nenhum fornecedor cadastrado ainda.
             </div>
           ) : (
@@ -63,7 +63,7 @@ export default async function SuppliersPage() {
                     <TableCell>{supplier.notes || "-"}</TableCell>
                     <TableCell>
                       {new Intl.DateTimeFormat("pt-BR").format(
-                        supplier.createdAt,
+                        supplier.createdAt
                       )}
                     </TableCell>
                   </TableRow>

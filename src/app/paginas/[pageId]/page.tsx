@@ -45,13 +45,23 @@ export default async function ExtractedPagePage({
           {page.catalog.fileName} · Fornecedor: {page.catalog.supplier.name}
         </p>
       </div>
-      <form
-        action={`/api/catalog-pages/${page.id}/extract-products`}
-        method="post"
-      >
-        <Button type="submit">Extrair produtos desta página</Button>
-      </form>
+      <div className="flex flex-wrap items-center gap-3">
+        <form
+          action={`/api/catalog-pages/${page.id}/generate-cards`}
+          method="post"
+        >
+          <Button type="submit" variant="outline">
+            Gerar recortes de produtos
+          </Button>
+        </form>
 
+        <form
+          action={`/api/catalog-pages/${page.id}/extract-products`}
+          method="post"
+        >
+          <Button type="submit">Extrair produtos desta página</Button>
+        </form>
+      </div>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card>
           <CardContent className="p-4">
@@ -112,6 +122,7 @@ export default async function ExtractedPagePage({
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>Imagem</TableHead>
                   <TableHead>Nome</TableHead>
                   <TableHead>Código</TableHead>
                   <TableHead>Categoria</TableHead>
@@ -123,6 +134,20 @@ export default async function ExtractedPagePage({
               <TableBody>
                 {page.rawProducts.map((product) => (
                   <TableRow key={product.id}>
+                    <TableCell>
+                      {product.imageUrl ? (
+                        <Image
+                          src={`/api/raw-products/${product.id}/image`}
+                          alt={product.translatedNamePt || "Produto bruto"}
+                          width={160}
+                          height={120}
+                          unoptimized
+                          className="rounded border object-contain"
+                        />
+                      ) : (
+                        "-"
+                      )}
+                    </TableCell>
                     <TableCell className="font-medium">
                       {product.translatedNamePt || "-"}
                     </TableCell>

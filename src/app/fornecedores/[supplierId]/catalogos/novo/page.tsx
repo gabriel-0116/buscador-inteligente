@@ -32,7 +32,7 @@ export default async function NewCatalogPage({ params }: NewCatalogPageProps) {
 
         <h1 className="text-2xl font-semibold">Enviar catálogo em PDF</h1>
 
-        <p className="text-sm text-muted-foreground">
+        <p className="text-muted-foreground text-sm">
           Fornecedor: {supplier.name}
         </p>
       </div>
@@ -60,7 +60,7 @@ export default async function NewCatalogPage({ params }: NewCatalogPageProps) {
                 accept="application/pdf,.pdf"
                 required
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="text-muted-foreground text-xs">
                 Nesta fase, o sistema apenas salva o PDF e registra os
                 metadados. Extração de páginas vem depois. Limite atual: 100 MB.
               </p>

@@ -7,7 +7,7 @@ export default function HomePage() {
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
       <div>
         <h1 className="text-3xl font-semibold">Buscador Inteligente</h1>
-        <p className="mt-2 text-muted-foreground">
+        <p className="text-muted-foreground mt-2">
           Sistema interno para encontrar produtos nos catálogos em PDF dos
           fornecedores.
         </p>
@@ -19,7 +19,7 @@ export default function HomePage() {
             <CardTitle>1. Fornecedores</CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-muted-foreground text-sm">
               Cadastre os fornecedores antes de subir qualquer catálogo.
             </p>
             <Button asChild>
@@ -33,7 +33,7 @@ export default function HomePage() {
             <CardTitle>2. Catálogos em PDF</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-muted-foreground text-sm">
               Próxima fase: upload de PDF vinculado ao fornecedor.
             </p>
           </CardContent>
@@ -44,7 +44,7 @@ export default function HomePage() {
             <CardTitle>3. Produtos brutos</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-muted-foreground text-sm">
               Depois: extrair páginas, identificar produtos e revisar no painel.
             </p>
           </CardContent>
