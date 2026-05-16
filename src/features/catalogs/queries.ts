@@ -7,6 +7,11 @@ export async function getCatalogById(id: string) {
     },
     include: {
       supplier: true,
+      offers: {
+        select: {
+          id: true,
+        },
+      },
       pages: {
         orderBy: {
           pageNumber: "asc",

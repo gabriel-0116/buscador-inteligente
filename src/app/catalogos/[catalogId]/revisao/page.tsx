@@ -18,6 +18,10 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  createSupplierOfferFromRawProduct,
+  createSupplierOffersFromApprovedRawProducts,
+} from "@/features/supplier-offers/actions";
 
 type CatalogReviewPageProps = {
   params: Promise<{
@@ -79,6 +83,14 @@ export default async function CatalogReviewPage({
     (product) => product.status === "REJECTED"
   ).length;
 
+  const offersCreatedCount = rawProducts.filter(
+    (product) => product.supplierOffer
+  ).length;
+
+  const approvedWithoutOfferCount = rawProducts.filter(
+    (product) => product.status === "APPROVED" && !product.supplierOffer
+  ).length;
+
   const confidentPendingCount = rawProducts.filter(
     (product) =>
       product.status === "PENDING_REVIEW" &&
@@ -106,20 +118,32 @@ export default async function CatalogReviewPage({
             {catalog.fileName} · Fornecedor: {catalog.supplier.name}
           </p>
         </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {approvedWithoutOfferCount > 0 ? (
+            <form action={createSupplierOffersFromApprovedRawProducts}>
+              <input type="hidden" name="catalogId" value={catalog.id} />
+              <input type="hidden" name="returnTo" value={returnTo} />
 
-        {confidentPendingCount > 0 ? (
-          <form action={approveConfidentRawProductsFromCatalog}>
-            <input type="hidden" name="catalogId" value={catalog.id} />
-            <input type="hidden" name="returnTo" value={returnTo} />
+              <Button type="submit" variant="outline">
+                Criar ofertas aprovadas ({approvedWithoutOfferCount})
+              </Button>
+            </form>
+          ) : null}
 
-            <Button type="submit">
-              Aprovar confiáveis ({confidentPendingCount})
-            </Button>
-          </form>
-        ) : null}
+          {confidentPendingCount > 0 ? (
+            <form action={approveConfidentRawProductsFromCatalog}>
+              <input type="hidden" name="catalogId" value={catalog.id} />
+              <input type="hidden" name="returnTo" value={returnTo} />
+
+              <Button type="submit">
+                Aprovar confiáveis ({confidentPendingCount})
+              </Button>
+            </form>
+          ) : null}
+        </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-5">
         <Card>
           <CardHeader>
             <CardTitle className="text-sm font-medium">Total</CardTitle>
@@ -155,6 +179,17 @@ export default async function CatalogReviewPage({
             <p className="text-2xl font-semibold">{rejectedCount}</p>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm font-medium">
+              Ofertas criadas
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-semibold">{offersCreatedCount}</p>
+          </CardContent>
+        </Card>
       </div>
 
       <Card>
@@ -179,6 +214,7 @@ export default async function CatalogReviewPage({
                   <TableHead>Categoria</TableHead>
                   <TableHead>Confiança</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Oferta</TableHead>
                   <TableHead className="text-right">Ações</TableHead>
                 </TableRow>
               </TableHeader>
@@ -224,9 +260,32 @@ export default async function CatalogReviewPage({
                         {formatStatus(product.status)}
                       </Badge>
                     </TableCell>
+                    <TableCell>
+                      {product.supplierOffer ? "Criada" : "-"}
+                    </TableCell>
 
                     <TableCell>
                       <div className="flex justify-end gap-2">
+                        {product.status === "APPROVED" &&
+                        !product.supplierOffer ? (
+                          <form action={createSupplierOfferFromRawProduct}>
+                            <input
+                              type="hidden"
+                              name="rawProductId"
+                              value={product.id}
+                            />
+                            <input
+                              type="hidden"
+                              name="returnTo"
+                              value={returnTo}
+                            />
+
+                            <Button type="submit" size="sm" variant="outline">
+                              Criar oferta
+                            </Button>
+                          </form>
+                        ) : null}
+
                         <Button variant="outline" size="sm" asChild>
                           <Link href={`/produtos-brutos/${product.id}`}>
                             Editar

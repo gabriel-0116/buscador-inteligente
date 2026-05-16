@@ -35,6 +35,13 @@ export async function getRawProductsReviewByCatalogId(catalogId: string) {
             orderBy: {
               createdAt: "asc",
             },
+            include: {
+              supplierOffer: {
+                select: {
+                  id: true,
+                },
+              },
+            },
           },
         },
       },

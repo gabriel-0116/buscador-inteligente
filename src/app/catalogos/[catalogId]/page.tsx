@@ -37,6 +37,8 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
     0
   );
 
+  const supplierOffersCount = catalog.offers?.length ?? 0;
+
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
       <div className="flex items-start justify-between gap-4">
@@ -133,6 +135,19 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           </CardHeader>
           <CardContent>
             <p className="text-lg font-semibold">{catalog.pageCount ?? "-"}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Ofertas do fornecedor</CardTitle>
+          </CardHeader>
+
+          <CardContent>
+            <p className="text-muted-foreground text-sm">
+              {supplierOffersCount} ofertas criadas a partir dos produtos
+              aprovados.
+            </p>
           </CardContent>
         </Card>
 

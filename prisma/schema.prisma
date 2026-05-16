@@ -45,8 +45,9 @@ model Catalog {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
 
-  supplier Supplier      @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  supplier Supplier        @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   pages    CatalogPage[]
+  offers   SupplierOffer[]
 
   @@index([supplierId])
   @@index([status])
@@ -84,7 +85,8 @@ model RawProduct {
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
-  catalogPage CatalogPage @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
+  catalogPage   CatalogPage    @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
+  supplierOffer SupplierOffer?
 
   @@index([catalogPageId])
   @@index([status])
@@ -106,6 +108,8 @@ model SupplierOffer {
   id                  String   @id @default(cuid())
   supplierId          String
   canonicalProductId  String
+  rawProductId        String?  @unique
+  catalogId           String?
   supplierProductName String?
   supplierCode        String?
   catalogReference    String?
@@ -115,7 +119,10 @@ model SupplierOffer {
 
   supplier         Supplier         @relation(fields: [supplierId], references: [id], onDelete: Cascade)
   canonicalProduct CanonicalProduct @relation(fields: [canonicalProductId], references: [id], onDelete: Cascade)
+  rawProduct       RawProduct?      @relation(fields: [rawProductId], references: [id], onDelete: SetNull)
+  catalog          Catalog?         @relation(fields: [catalogId], references: [id], onDelete: Cascade)
 
   @@index([supplierId])
   @@index([canonicalProductId])
+  @@index([catalogId])
 }
