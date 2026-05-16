@@ -30,6 +30,13 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
     notFound();
   }
 
+  const ocrPagesCount = catalog.pages.filter((page) => page.rawText).length;
+
+  const rawProductsCount = catalog.pages.reduce(
+    (total, page) => total + page.rawProducts.length,
+    0
+  );
+
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
       <div className="flex items-start justify-between gap-4">
@@ -66,6 +73,17 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
             <form action={`/api/catalogs/${catalog.id}/ocr`} method="post">
               <Button type="submit" variant="outline">
                 Executar OCR
+              </Button>
+            </form>
+          ) : null}
+
+          {ocrPagesCount > 0 ? (
+            <form
+              action={`/api/catalogs/${catalog.id}/extract-products`}
+              method="post"
+            >
+              <Button type="submit" variant="outline">
+                Extrair produtos
               </Button>
             </form>
           ) : null}
@@ -158,6 +176,18 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           <p className="text-muted-foreground text-sm">
             {catalog.pages.filter((page) => page.rawText).length} de{" "}
             {catalog.pages.length} páginas com texto bruto extraído.
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Produtos brutos</CardTitle>
+        </CardHeader>
+
+        <CardContent>
+          <p className="text-muted-foreground text-sm">
+            {rawProductsCount} produtos brutos extraídos automaticamente.
           </p>
         </CardContent>
       </Card>

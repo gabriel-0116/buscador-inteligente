@@ -11,6 +11,13 @@ export async function getCatalogById(id: string) {
         orderBy: {
           pageNumber: "asc",
         },
+        include: {
+          rawProducts: {
+            select: {
+              id: true,
+            },
+          },
+        },
       },
     },
   });

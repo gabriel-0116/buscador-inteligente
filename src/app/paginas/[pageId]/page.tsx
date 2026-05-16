@@ -49,6 +49,12 @@ export default async function ExtractedPagePage({
           {page.catalog.fileName} · Fornecedor: {page.catalog.supplier.name}
         </p>
       </div>
+      <form
+        action={`/api/catalog-pages/${page.id}/extract-products`}
+        method="post"
+      >
+        <Button type="submit">Extrair produtos desta página</Button>
+      </form>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card>
@@ -68,67 +74,6 @@ export default async function ExtractedPagePage({
           <CardHeader>
             <CardTitle>Dados da página</CardTitle>
           </CardHeader>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Novo produto bruto</CardTitle>
-            </CardHeader>
-
-            <CardContent>
-              <form action={createRawProduct} className="grid gap-4">
-                <input type="hidden" name="catalogPageId" value={page.id} />
-
-                <div className="grid gap-2">
-                  <Label htmlFor="translatedNamePt">Nome em português</Label>
-                  <Input
-                    id="translatedNamePt"
-                    name="translatedNamePt"
-                    placeholder="Ex: Adaptador de tomada USB"
-                    required
-                  />
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="code">Código/modelo</Label>
-                  <Input id="code" name="code" placeholder="Ex: CB-075" />
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="brand">Marca</Label>
-                  <Input id="brand" name="brand" placeholder="Ex: LUKTON" />
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="category">Categoria</Label>
-                  <Input
-                    id="category"
-                    name="category"
-                    placeholder="Ex: Adaptadores elétricos"
-                  />
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="translatedDescriptionPt">Descrição</Label>
-                  <Textarea
-                    id="translatedDescriptionPt"
-                    name="translatedDescriptionPt"
-                    placeholder="Descrição curta do produto"
-                  />
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="originalText">Texto original/OCR usado</Label>
-                  <Textarea
-                    id="originalText"
-                    name="originalText"
-                    placeholder="Cole aqui o trecho do OCR ou texto original relacionado ao produto"
-                  />
-                </div>
-
-                <Button type="submit">Adicionar produto bruto</Button>
-              </form>
-            </CardContent>
-          </Card>
 
           <CardContent className="grid gap-4 text-sm">
             <div>
@@ -165,7 +110,7 @@ export default async function ExtractedPagePage({
         <CardContent>
           {page.rawProducts.length === 0 ? (
             <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
-              Nenhum produto bruto cadastrado nesta página ainda.
+              Nenhum produto bruto extraído nesta página ainda.
             </div>
           ) : (
             <Table>
@@ -173,8 +118,8 @@ export default async function ExtractedPagePage({
                 <TableRow>
                   <TableHead>Nome</TableHead>
                   <TableHead>Código</TableHead>
-                  <TableHead>Marca</TableHead>
                   <TableHead>Categoria</TableHead>
+                  <TableHead>Confiança</TableHead>
                   <TableHead>Status</TableHead>
                 </TableRow>
               </TableHeader>
@@ -186,8 +131,12 @@ export default async function ExtractedPagePage({
                       {product.translatedNamePt || "-"}
                     </TableCell>
                     <TableCell>{product.code || "-"}</TableCell>
-                    <TableCell>{product.brand || "-"}</TableCell>
                     <TableCell>{product.category || "-"}</TableCell>
+                    <TableCell>
+                      {product.confidence
+                        ? `${Math.round(product.confidence * 100)}%`
+                        : "-"}
+                    </TableCell>
                     <TableCell>{product.status}</TableCell>
                   </TableRow>
                 ))}
