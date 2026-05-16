@@ -3,6 +3,11 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
+import {
+  createSupplierOfferFromRawProductId,
+  createSupplierOffersFromApprovedRawProductsByCatalogId,
+  deleteSupplierOfferFromRawProductId,
+} from "@/features/supplier-offers/service";
 
 function getReturnTo(formData: FormData) {
   const returnTo = String(formData.get("returnTo") ?? "").trim();
@@ -88,9 +93,13 @@ export async function approveRawProduct(formData: FormData) {
     },
   });
 
+  await createSupplierOfferFromRawProductId(rawProduct.id);
+
   revalidatePath(`/produtos-brutos/${rawProduct.id}`);
   revalidatePath(`/paginas/${rawProduct.catalogPageId}`);
+  revalidatePath(`/catalogos/${rawProduct.catalogPage.catalogId}`);
   revalidatePath(`/catalogos/${rawProduct.catalogPage.catalogId}/revisao`);
+  revalidatePath("/busca");
 
   if (returnTo) {
     redirect(returnTo);
@@ -104,6 +113,8 @@ export async function rejectRawProduct(formData: FormData) {
   if (!rawProductId) {
     throw new Error("Produto bruto é obrigatório.");
   }
+
+  await deleteSupplierOfferFromRawProductId(rawProductId);
 
   const rawProduct = await prisma.rawProduct.update({
     where: {
@@ -125,7 +136,9 @@ export async function rejectRawProduct(formData: FormData) {
 
   revalidatePath(`/produtos-brutos/${rawProduct.id}`);
   revalidatePath(`/paginas/${rawProduct.catalogPageId}`);
+  revalidatePath(`/catalogos/${rawProduct.catalogPage.catalogId}`);
   revalidatePath(`/catalogos/${rawProduct.catalogPage.catalogId}/revisao`);
+  revalidatePath("/busca");
 
   if (returnTo) {
     redirect(returnTo);
@@ -163,6 +176,8 @@ export async function approveConfidentRawProductsFromCatalog(
       confidence: 1,
     },
   });
+
+  await createSupplierOffersFromApprovedRawProductsByCatalogId(catalogId);
 
   revalidatePath(`/catalogos/${catalogId}`);
   revalidatePath(`/catalogos/${catalogId}/revisao`);
