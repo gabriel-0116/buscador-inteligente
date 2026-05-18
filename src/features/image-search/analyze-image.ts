@@ -1,4 +1,4 @@
-type ImageSearchAnalysis = {
+export type ImageSearchAnalysis = {
   productName: string | null;
   category: string | null;
   function: string | null;
@@ -36,6 +36,45 @@ function cleanConfidence(value: unknown) {
   }
 
   return Math.max(0, Math.min(1, value));
+}
+
+function normalizeText(value: string | null | undefined) {
+  return (value ?? "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .toLowerCase()
+    .trim();
+}
+
+function isUsefulSearchTerm(term: string) {
+  const normalizedTerm = normalizeText(term);
+  const words = normalizedTerm.split(/\s+/).filter(Boolean);
+
+  if (normalizedTerm.length < 3) {
+    return false;
+  }
+
+  if (words.length > 4) {
+    return false;
+  }
+
+  const blockedTerms = new Set([
+    "produto",
+    "item",
+    "imagem",
+    "acessorio",
+    "acessorios",
+    "eletrico",
+    "eletricos",
+    "uso",
+    "cozinha",
+  ]);
+
+  if (blockedTerms.has(normalizedTerm)) {
+    return false;
+  }
+
+  return true;
 }
 
 function extractResponseText(response: unknown) {
@@ -109,15 +148,7 @@ export function buildImageSearchTerms(analysis: ImageSearchAnalysis) {
   const terms = [
     ...analysis.visibleCodes,
     analysis.productName,
-    analysis.function,
-    analysis.category,
     ...analysis.searchTerms,
-    analysis.productName && analysis.category
-      ? `${analysis.productName} ${analysis.category}`
-      : null,
-    analysis.productName && analysis.function
-      ? `${analysis.productName} ${analysis.function}`
-      : null,
   ];
 
   const uniqueTerms = new Map<string, string>();
@@ -127,16 +158,22 @@ export function buildImageSearchTerms(analysis: ImageSearchAnalysis) {
       continue;
     }
 
-    const normalized = term.toLowerCase().trim();
+    const trimmedTerm = term.trim();
+
+    if (!isUsefulSearchTerm(trimmedTerm)) {
+      continue;
+    }
+
+    const normalized = normalizeText(trimmedTerm);
 
     if (!normalized) {
       continue;
     }
 
-    uniqueTerms.set(normalized, term.trim());
+    uniqueTerms.set(normalized, trimmedTerm);
   }
 
-  return Array.from(uniqueTerms.values()).slice(0, 8);
+  return Array.from(uniqueTerms.values()).slice(0, 6);
 }
 
 export async function analyzeImageForProductSearch(
@@ -168,6 +205,11 @@ Regras:
 - Traduza nomes e categorias para português.
 - Use categoria comercial real.
 - Seja conservador quando houver dúvida.
+- searchTerms deve conter termos curtos e comerciais, nunca frases longas.
+- searchTerms deve ter no máximo 6 itens.
+- Não coloque função explicativa longa em searchTerms.
+- Bons exemplos de searchTerms: "liquidificador portátil", "mini liquidificador", "blender portátil".
+- Maus exemplos de searchTerms: "triturar e misturar frutas e outros ingredientes para preparar bebidas".
 
 Responda somente JSON válido, sem markdown, neste formato:
 
