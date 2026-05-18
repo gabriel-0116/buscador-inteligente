@@ -22,6 +22,36 @@ function getSearchTokens(query: string) {
     .filter(Boolean);
 }
 
+function getSearchableText(offer: {
+  supplierProductName: string | null;
+  supplierCode: string | null;
+  catalogReference: string | null;
+  supplier: {
+    name: string;
+  };
+  canonicalProduct: {
+    namePt: string;
+    descriptionPt: string | null;
+    category: string | null;
+    function: string | null;
+  };
+}) {
+  return normalizeText(
+    [
+      offer.supplierProductName,
+      offer.supplierCode,
+      offer.catalogReference,
+      offer.supplier.name,
+      offer.canonicalProduct.namePt,
+      offer.canonicalProduct.descriptionPt,
+      offer.canonicalProduct.category,
+      offer.canonicalProduct.function,
+    ]
+      .filter(Boolean)
+      .join(" ")
+  );
+}
+
 export async function getSearchFilters() {
   const offers = await prisma.supplierOffer.findMany({
     select: {
@@ -40,7 +70,7 @@ export async function getSearchFilters() {
     orderBy: {
       updatedAt: "desc",
     },
-    take: 1000,
+    take: 5000,
   });
 
   const suppliersMap = new Map<string, string>();
@@ -66,14 +96,13 @@ export async function getSearchFilters() {
   };
 }
 
-export async function searchSupplierOffers({
-  query,
+async function getCandidateOffers({
   supplierId,
   category,
-}: SearchSupplierOffersParams) {
-  const search = query.trim();
-  const tokens = getSearchTokens(search);
-
+}: {
+  supplierId?: string;
+  category?: string;
+}) {
   const andFilters: Prisma.SupplierOfferWhereInput[] = [];
 
   if (supplierId) {
@@ -93,79 +122,13 @@ export async function searchSupplierOffers({
     });
   }
 
-  if (tokens.length > 0) {
-    andFilters.push({
-      AND: tokens.map((token) => ({
-        OR: [
-          {
-            supplierProductName: {
-              contains: token,
-              mode: "insensitive",
-            },
-          },
-          {
-            supplierCode: {
-              contains: token,
-              mode: "insensitive",
-            },
-          },
-          {
-            catalogReference: {
-              contains: token,
-              mode: "insensitive",
-            },
-          },
-          {
-            supplier: {
-              name: {
-                contains: token,
-                mode: "insensitive",
-              },
-            },
-          },
-          {
-            canonicalProduct: {
-              OR: [
-                {
-                  namePt: {
-                    contains: token,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  descriptionPt: {
-                    contains: token,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  category: {
-                    contains: token,
-                    mode: "insensitive",
-                  },
-                },
-                {
-                  function: {
-                    contains: token,
-                    mode: "insensitive",
-                  },
-                },
-              ],
-            },
-          },
-        ],
-      })),
-    });
-  }
-
-  if (andFilters.length === 0) {
-    return [];
-  }
-
-  const offers = await prisma.supplierOffer.findMany({
-    where: {
-      AND: andFilters,
-    },
+  return prisma.supplierOffer.findMany({
+    where:
+      andFilters.length > 0
+        ? {
+            AND: andFilters,
+          }
+        : undefined,
     include: {
       supplier: true,
       canonicalProduct: true,
@@ -186,13 +149,32 @@ export async function searchSupplierOffers({
     orderBy: {
       updatedAt: "desc",
     },
-    take: 200,
+    take: 5000,
   });
+}
 
+export async function searchSupplierOffers({
+  query,
+  supplierId,
+  category,
+}: SearchSupplierOffersParams) {
+  const search = query.trim();
   const normalizedSearch = normalizeText(search);
+  const tokens = getSearchTokens(search);
+
+  if (!search && !supplierId && !category) {
+    return [];
+  }
+
+  const offers = await getCandidateOffers({
+    supplierId,
+    category,
+  });
 
   return offers
     .map((offer) => {
+      const searchableText = getSearchableText(offer);
+
       const supplierProductName = normalizeText(offer.supplierProductName);
       const canonicalName = normalizeText(offer.canonicalProduct.namePt);
       const supplierCode = normalizeText(offer.supplierCode);
@@ -201,26 +183,45 @@ export async function searchSupplierOffers({
       const description = normalizeText(offer.canonicalProduct.descriptionPt);
       const productFunction = normalizeText(offer.canonicalProduct.function);
 
+      const allTokensMatched =
+        tokens.length === 0 ||
+        tokens.every((token) => searchableText.includes(token));
+
       let score = 0;
 
+      if (tokens.length === 0) {
+        score += 10;
+      }
+
+      if (allTokensMatched) {
+        score += 40;
+      }
+
       if (normalizedSearch) {
-        if (supplierCode === normalizedSearch) score += 100;
-        if (supplierCode.includes(normalizedSearch)) score += 80;
-        if (canonicalName === normalizedSearch) score += 70;
-        if (canonicalName.includes(normalizedSearch)) score += 50;
-        if (supplierProductName.includes(normalizedSearch)) score += 45;
-        if (productCategory.includes(normalizedSearch)) score += 25;
-        if (productFunction.includes(normalizedSearch)) score += 20;
+        if (supplierCode === normalizedSearch) score += 120;
+        if (supplierCode.includes(normalizedSearch)) score += 90;
+
+        if (canonicalName === normalizedSearch) score += 80;
+        if (canonicalName.includes(normalizedSearch)) score += 60;
+
+        if (supplierProductName === normalizedSearch) score += 75;
+        if (supplierProductName.includes(normalizedSearch)) score += 55;
+
+        if (productCategory === normalizedSearch) score += 45;
+        if (productCategory.includes(normalizedSearch)) score += 35;
+
+        if (productFunction.includes(normalizedSearch)) score += 25;
         if (description.includes(normalizedSearch)) score += 15;
         if (supplierName.includes(normalizedSearch)) score += 10;
 
         for (const token of tokens) {
-          if (supplierCode.includes(token)) score += 20;
-          if (canonicalName.includes(token)) score += 15;
-          if (supplierProductName.includes(token)) score += 12;
-          if (productCategory.includes(token)) score += 8;
-          if (productFunction.includes(token)) score += 6;
-          if (description.includes(token)) score += 4;
+          if (supplierCode.includes(token)) score += 25;
+          if (canonicalName.includes(token)) score += 18;
+          if (supplierProductName.includes(token)) score += 15;
+          if (productCategory.includes(token)) score += 12;
+          if (productFunction.includes(token)) score += 8;
+          if (description.includes(token)) score += 5;
+          if (supplierName.includes(token)) score += 3;
         }
       }
 
@@ -241,7 +242,15 @@ export async function searchSupplierOffers({
       return {
         offer,
         score,
+        allTokensMatched,
       };
+    })
+    .filter((result) => {
+      if (tokens.length === 0) {
+        return true;
+      }
+
+      return result.allTokensMatched || result.score >= 60;
     })
     .sort((a, b) => {
       if (b.score !== a.score) {
