@@ -2,6 +2,7 @@ allowBuilds:
   "@prisma/engines": true
   msw: true
   prisma: true
+  protobufjs: true
   sharp: true
   unrs-resolver: true
 ignoredBuiltDependencies:
