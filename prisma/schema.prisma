@@ -85,8 +85,9 @@ model RawProduct {
   createdAt               DateTime         @default(now())
   updatedAt               DateTime         @updatedAt
 
-  catalogPage   CatalogPage    @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
-  supplierOffer SupplierOffer?
+  catalogPage     CatalogPage                @relation(fields: [catalogPageId], references: [id], onDelete: Cascade)
+  supplierOffer   SupplierOffer?
+  visualEmbedding RawProductVisualEmbedding?
 
   @@index([catalogPageId])
   @@index([status])
@@ -125,4 +126,19 @@ model SupplierOffer {
   @@index([supplierId])
   @@index([canonicalProductId])
   @@index([catalogId])
+}
+
+model RawProductVisualEmbedding {
+  id           String   @id @default(cuid())
+  rawProductId String   @unique
+  embedding    Json
+  model        String
+  imageUrl     String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  rawProduct RawProduct @relation(fields: [rawProductId], references: [id], onDelete: Cascade)
+
+  @@index([rawProductId])
+  @@index([model])
 }
