@@ -58,6 +58,7 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
   const hasRawProducts = rawProductsCount > 0;
   const hasPendingReview = pendingReviewCount > 0;
   const hasOffers = supplierOffersCount > 0;
+  const hasCompletedAuxiliaryOcr = hasPages && ocrPagesCount === pagesCount;
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-6 p-6">
@@ -273,6 +274,41 @@ export default async function CatalogPage({ params }: CatalogPageProps) {
           ) : (
             <Button variant="outline" asChild>
               <Link href={`/catalogos/${catalog.id}/revisao`}>Ver revisão</Link>
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Ferramentas auxiliares</CardTitle>
+        </CardHeader>
+
+        <CardContent className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <p className="font-medium">OCR auxiliar das páginas</p>
+            <p className="text-muted-foreground text-sm">
+              Usa OCR na página inteira para gerar texto bruto de apoio. Isso
+              ajuda em análise e depuração, mas não é obrigatório para criar
+              produtos, ofertas ou busca textual.
+            </p>
+
+            <p className="text-muted-foreground mt-2 text-xs">
+              Status: {ocrPagesCount}/{pagesCount} páginas com texto bruto.
+            </p>
+          </div>
+
+          {hasPages ? (
+            <form action={`/api/catalogs/${catalog.id}/ocr`} method="post">
+              <Button type="submit" variant="outline">
+                {hasCompletedAuxiliaryOcr
+                  ? "Reexecutar OCR auxiliar"
+                  : "Executar OCR auxiliar"}
+              </Button>
+            </form>
+          ) : (
+            <Button type="button" variant="outline" disabled>
+              Processe as páginas primeiro
             </Button>
           )}
         </CardContent>
