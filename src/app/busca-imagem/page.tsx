@@ -24,6 +24,8 @@ type ImageSearchResult = {
   supplierCode: string | null;
   catalogReference: string | null;
   confidence: number | null;
+  visualSimilarity?: number;
+  hybridScore?: number;
   matchReason: string;
   supplier: {
     id: string;
@@ -111,7 +113,7 @@ export default function ImageSearchPage() {
     formData.append("image", imageFile);
 
     try {
-      const result = await fetch("/api/image-search", {
+      const result = await fetch("/api/visual-search", {
         method: "POST",
         body: formData,
       });
@@ -370,7 +372,11 @@ export default function ImageSearchPage() {
                         <p className="text-muted-foreground text-xs">
                           Confiança
                         </p>
-                        <p>{formatConfidence(result.confidence)}</p>
+                        <p>
+                          {typeof result.visualSimilarity === "number"
+                            ? `${Math.round(result.visualSimilarity * 100)}%`
+                            : formatConfidence(result.confidence)}
+                        </p>
                       </div>
                     </div>
 
