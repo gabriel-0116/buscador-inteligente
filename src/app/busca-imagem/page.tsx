@@ -2,7 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +18,8 @@ type ImageSearchAnalysis = {
   notes: string | null;
 };
 
+type ImageSearchResultLevel = "STRONG" | "POSSIBLE";
+
 type ImageSearchResult = {
   id: string;
   supplierProductName: string | null;
@@ -26,6 +28,7 @@ type ImageSearchResult = {
   confidence: number | null;
   visualSimilarity?: number;
   hybridScore?: number;
+  resultLevel?: ImageSearchResultLevel;
   matchReason: string;
   supplier: {
     id: string;
@@ -63,12 +66,139 @@ function formatConfidence(confidence: number | null) {
   return `${Math.round(confidence * 100)}%`;
 }
 
+function formatSimilarity(similarity: number | undefined) {
+  if (typeof similarity !== "number") {
+    return "-";
+  }
+
+  return `${Math.round(similarity * 100)}%`;
+}
+
+function ResultCard({ result }: { result: ImageSearchResult }) {
+  const isStrong = result.resultLevel === "STRONG";
+
+  return (
+    <div className="grid gap-4 rounded-lg border p-4 md:grid-cols-[150px_1fr]">
+      <div className="bg-muted relative h-32 overflow-hidden rounded border">
+        {result.rawProduct?.imageUrl ? (
+          <Image
+            src={`/api/raw-products/${result.rawProduct.id}/image`}
+            alt={result.supplierProductName || result.canonicalProduct.namePt}
+            fill
+            unoptimized
+            className="object-contain"
+          />
+        ) : (
+          <div className="text-muted-foreground flex h-full items-center justify-center text-xs">
+            Sem imagem
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-3">
+        <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="font-semibold">{result.canonicalProduct.namePt}</h2>
+
+            {result.supplierProductName &&
+            result.supplierProductName !== result.canonicalProduct.namePt ? (
+              <p className="text-muted-foreground text-sm">
+                Nome no fornecedor: {result.supplierProductName}
+              </p>
+            ) : null}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={isStrong ? "secondary" : "outline"}>
+              {isStrong ? "Resultado forte" : "Possível parecido"}
+            </Badge>
+
+            <Badge variant="outline">{result.matchReason}</Badge>
+          </div>
+        </div>
+
+        <div className="grid gap-2 text-sm md:grid-cols-5">
+          <div>
+            <p className="text-muted-foreground text-xs">Fornecedor</p>
+            <p>{result.supplier.name}</p>
+          </div>
+
+          <div>
+            <p className="text-muted-foreground text-xs">Código</p>
+            <p>{result.supplierCode || "-"}</p>
+          </div>
+
+          <div>
+            <p className="text-muted-foreground text-xs">Categoria</p>
+            <p>{result.canonicalProduct.category || "-"}</p>
+          </div>
+
+          <div>
+            <p className="text-muted-foreground text-xs">Similaridade visual</p>
+            <p>{formatSimilarity(result.visualSimilarity)}</p>
+          </div>
+
+          <div>
+            <p className="text-muted-foreground text-xs">Confiança extração</p>
+            <p>{formatConfidence(result.confidence)}</p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-3 text-sm">
+          {result.rawProduct ? (
+            <Link
+              href={`/produtos-brutos/${result.rawProduct.id}`}
+              className="underline-offset-4 hover:underline"
+            >
+              Ver recorte do catálogo
+            </Link>
+          ) : null}
+
+          {result.catalog ? (
+            <Link
+              href={`/catalogos/${result.catalog.id}`}
+              className="underline-offset-4 hover:underline"
+            >
+              Abrir catálogo
+            </Link>
+          ) : null}
+
+          <Link
+            href={`/busca?q=${encodeURIComponent(
+              result.supplierCode ||
+                result.supplierProductName ||
+                result.canonicalProduct.namePt
+            )}`}
+            className="underline-offset-4 hover:underline"
+          >
+            Ver na busca textual
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function ImageSearchPage() {
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [response, setResponse] = useState<ImageSearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
+
+  const strongResults = useMemo(() => {
+    return (
+      response?.results.filter((result) => result.resultLevel === "STRONG") ??
+      []
+    );
+  }, [response]);
+
+  const possibleResults = useMemo(() => {
+    return (
+      response?.results.filter((result) => result.resultLevel !== "STRONG") ??
+      []
+    );
+  }, [response]);
 
   useEffect(() => {
     return () => {
@@ -149,8 +279,8 @@ export default function ImageSearchPage() {
           <h1 className="text-2xl font-semibold">Busca por imagem</h1>
 
           <p className="text-muted-foreground mt-1 text-sm">
-            Envie uma foto, print ou imagem de embalagem para encontrar
-            candidatos dentro dos catálogos já estruturados.
+            Envie uma foto ou print de produto para encontrar recortes
+            visualmente parecidos nos catálogos dos fornecedores.
           </p>
         </div>
 
@@ -175,14 +305,14 @@ export default function ImageSearchPage() {
               />
 
               <p className="text-muted-foreground text-xs">
-                Use imagem do produto principal. Evite fotos com muitos itens
-                misturados.
+                Use uma imagem com o produto principal bem visível. Quanto mais
+                limpo o recorte, melhor a comparação visual.
               </p>
             </div>
 
             {previewUrl ? (
               <div className="flex flex-col gap-2">
-                <p className="text-sm font-medium">Preview</p>
+                <p className="text-sm font-medium">Imagem enviada</p>
 
                 <div className="bg-muted relative h-72 w-full overflow-hidden rounded-lg border md:w-96">
                   <Image
@@ -204,7 +334,7 @@ export default function ImageSearchPage() {
 
             <div>
               <Button type="submit" disabled={isSearching || !imageFile}>
-                {isSearching ? "Buscando..." : "Buscar por imagem"}
+                {isSearching ? "Buscando..." : "Buscar por similaridade visual"}
               </Button>
             </div>
           </form>
@@ -214,7 +344,7 @@ export default function ImageSearchPage() {
       {response ? (
         <Card>
           <CardHeader>
-            <CardTitle>Análise da imagem</CardTitle>
+            <CardTitle>Sinais auxiliares da imagem</CardTitle>
           </CardHeader>
 
           <CardContent className="grid gap-4">
@@ -238,19 +368,19 @@ export default function ImageSearchPage() {
               </div>
 
               <div className="rounded-lg border p-3">
-                <p className="text-muted-foreground text-xs">Confiança</p>
+                <p className="text-muted-foreground text-xs">
+                  Confiança da análise
+                </p>
                 <p className="font-medium">
                   {formatConfidence(response.analysis.confidence)}
                 </p>
               </div>
             </div>
 
-            <div className="grid gap-2">
-              <p className="text-sm font-medium">Função real do produto</p>
-              <p className="text-muted-foreground text-sm">
-                {response.analysis.function || "-"}
-              </p>
-            </div>
+            <p className="text-muted-foreground text-sm">
+              Esses sinais ajudam a ordenar resultados, mas o motor principal é
+              a comparação visual com os recortes dos catálogos.
+            </p>
 
             {response.analysis.visibleCodes.length > 0 ? (
               <div className="grid gap-2">
@@ -265,158 +395,56 @@ export default function ImageSearchPage() {
                 </div>
               </div>
             ) : null}
-
-            <div className="grid gap-2">
-              <p className="text-sm font-medium">Termos usados na busca</p>
-
-              <div className="flex flex-wrap gap-2">
-                {response.searchTerms.map((term) => (
-                  <Badge key={term} variant="outline">
-                    {term}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-
-            {response.analysis.notes ? (
-              <p className="text-muted-foreground text-sm">
-                {response.analysis.notes}
-              </p>
-            ) : null}
           </CardContent>
         </Card>
       ) : null}
 
       <Card>
         <CardHeader>
-          <CardTitle>Resultados candidatos</CardTitle>
+          <CardTitle>Resultados fortes</CardTitle>
         </CardHeader>
 
         <CardContent>
           {!response ? (
             <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
-              Envie uma imagem para buscar candidatos dentro das ofertas
-              aprovadas.
+              Envie uma imagem para buscar produtos visualmente parecidos.
             </div>
-          ) : response.results.length === 0 ? (
+          ) : strongResults.length === 0 ? (
             <div className="text-muted-foreground rounded-lg border border-dashed p-8 text-center text-sm">
-              Nenhum candidato encontrado. Isso pode indicar imagem ambígua,
-              produto ainda não aprovado ou termo visual diferente do cadastro.
+              Nenhum resultado forte encontrado. Veja os possíveis parecidos
+              abaixo ou teste uma imagem mais limpa.
             </div>
           ) : (
             <div className="grid gap-4">
-              {response.results.map((result) => (
-                <div
-                  key={result.id}
-                  className="grid gap-4 rounded-lg border p-4 md:grid-cols-[140px_1fr]"
-                >
-                  <div className="bg-muted relative h-28 overflow-hidden rounded border">
-                    {result.rawProduct?.imageUrl ? (
-                      <Image
-                        src={`/api/raw-products/${result.rawProduct.id}/image`}
-                        alt={
-                          result.supplierProductName ||
-                          result.canonicalProduct.namePt
-                        }
-                        fill
-                        unoptimized
-                        className="object-contain"
-                      />
-                    ) : (
-                      <div className="text-muted-foreground flex h-full items-center justify-center text-xs">
-                        Sem imagem
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="grid gap-3">
-                    <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
-                      <div>
-                        <h2 className="font-semibold">
-                          {result.canonicalProduct.namePt}
-                        </h2>
-
-                        {result.supplierProductName &&
-                        result.supplierProductName !==
-                          result.canonicalProduct.namePt ? (
-                          <p className="text-muted-foreground text-sm">
-                            Nome no fornecedor: {result.supplierProductName}
-                          </p>
-                        ) : null}
-                      </div>
-
-                      <Badge variant="secondary">{result.matchReason}</Badge>
-                    </div>
-
-                    <div className="grid gap-2 text-sm md:grid-cols-4">
-                      <div>
-                        <p className="text-muted-foreground text-xs">
-                          Fornecedor
-                        </p>
-                        <p>{result.supplier.name}</p>
-                      </div>
-
-                      <div>
-                        <p className="text-muted-foreground text-xs">Código</p>
-                        <p>{result.supplierCode || "-"}</p>
-                      </div>
-
-                      <div>
-                        <p className="text-muted-foreground text-xs">
-                          Categoria
-                        </p>
-                        <p>{result.canonicalProduct.category || "-"}</p>
-                      </div>
-
-                      <div>
-                        <p className="text-muted-foreground text-xs">
-                          Confiança
-                        </p>
-                        <p>
-                          {typeof result.visualSimilarity === "number"
-                            ? `${Math.round(result.visualSimilarity * 100)}%`
-                            : formatConfidence(result.confidence)}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-3 text-sm">
-                      {result.rawProduct ? (
-                        <Link
-                          href={`/produtos-brutos/${result.rawProduct.id}`}
-                          className="underline-offset-4 hover:underline"
-                        >
-                          Ver produto bruto
-                        </Link>
-                      ) : null}
-
-                      {result.catalog ? (
-                        <Link
-                          href={`/catalogos/${result.catalog.id}`}
-                          className="underline-offset-4 hover:underline"
-                        >
-                          Abrir catálogo
-                        </Link>
-                      ) : null}
-
-                      <Link
-                        href={`/busca?q=${encodeURIComponent(
-                          result.supplierCode ||
-                            result.supplierProductName ||
-                            result.canonicalProduct.namePt
-                        )}`}
-                        className="underline-offset-4 hover:underline"
-                      >
-                        Ver na busca textual
-                      </Link>
-                    </div>
-                  </div>
-                </div>
+              {strongResults.map((result) => (
+                <ResultCard key={result.id} result={result} />
               ))}
             </div>
           )}
         </CardContent>
       </Card>
+
+      {response && possibleResults.length > 0 ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Possíveis parecidos</CardTitle>
+          </CardHeader>
+
+          <CardContent>
+            <details className="grid gap-4">
+              <summary className="cursor-pointer text-sm font-medium underline-offset-4 hover:underline">
+                Mostrar {possibleResults.length} resultado(s) menos confiáveis
+              </summary>
+
+              <div className="mt-4 grid gap-4">
+                {possibleResults.map((result) => (
+                  <ResultCard key={result.id} result={result} />
+                ))}
+              </div>
+            </details>
+          </CardContent>
+        </Card>
+      ) : null}
     </main>
   );
 }
