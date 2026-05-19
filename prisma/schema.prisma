@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
+  engineType = "library"
 }
 
 datasource db {
@@ -39,7 +40,7 @@ model ProductImage {
   width      Int
   height     Int
   fileSize   Int?
-  embedding  Unsupported("vector(512)")?
+  embedding  Unsupported("vector(768)")?
   createdAt  DateTime @default(now())
 
   catalog Catalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)

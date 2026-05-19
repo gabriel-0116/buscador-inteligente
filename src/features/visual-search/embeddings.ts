@@ -4,7 +4,10 @@ import { isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { env, pipeline, RawImage } from "@xenova/transformers";
 
-export const VISUAL_EMBEDDING_MODEL = "Xenova/clip-vit-base-patch32";
+// DINOv2 captures visual features without text alignment — much better for product similarity.
+// CLIP was designed for text-image matching, not image-image product search.
+export const VISUAL_EMBEDDING_MODEL = "Xenova/dinov2-base";
+export const EMBEDDING_DIM = 768;
 
 type ImageFeatureExtractionOutput = {
   data: ArrayLike<number>;
@@ -13,7 +16,7 @@ type ImageFeatureExtractionOutput = {
 type ImageFeatureExtractor = (
   input: unknown,
   options: {
-    pooling: "mean";
+    pooling: "cls" | "mean" | "none";
     normalize: boolean;
   }
 ) => Promise<ImageFeatureExtractionOutput>;
@@ -40,7 +43,7 @@ function normalizeVector(vector: number[]) {
   return vector.map((value) => value / norm);
 }
 
-async function getExtractor() {
+export async function getExtractor() {
   if (!extractorPromise) {
     extractorPromise = pipeline(
       "image-feature-extraction",
@@ -55,12 +58,18 @@ async function generateImageEmbeddingFromResolvedPath(imagePath: string) {
   const extractor = await getExtractor();
 
   const image = await RawImage.read(imagePath);
+  // @xenova/transformers ignores pooling for DINOv2 and returns the full [1, 257, 768] tensor.
+  // The CLS token is the first 768 values; slice it manually then normalize.
   const output = await extractor(image, {
-    pooling: "mean",
-    normalize: true,
+    pooling: "none",
+    normalize: false,
   });
 
-  return normalizeVector(Array.from(output.data, Number));
+  const clsToken = Array.from(output.data as Float32Array).slice(
+    0,
+    EMBEDDING_DIM
+  );
+  return normalizeVector(clsToken);
 }
 
 export async function generateImageEmbeddingFromPath(imagePath: string) {
