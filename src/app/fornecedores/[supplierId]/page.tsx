@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { CatalogUpload } from "./catalog-upload";
+import { DeleteCatalogButton } from "@/components/delete-catalog-button";
 
 type Props = { params: Promise<{ supplierId: string }> };
 
@@ -70,8 +71,9 @@ export default async function SupplierPage({ params }: Props) {
               <TableRow>
                 <TableHead>Arquivo</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead className="text-right">Imagens</TableHead>
+                <TableHead className="text-right">Candidatos</TableHead>
                 <TableHead>Enviado em</TableHead>
+                <TableHead />
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -95,10 +97,13 @@ export default async function SupplierPage({ params }: Props) {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right">
-                    {c.imageCount ?? "—"}
+                    {c.candidateCount ?? c.imageCount ?? "—"}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {new Date(c.createdAt).toLocaleDateString("pt-BR")}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <DeleteCatalogButton catalogId={c.id} />
                   </TableCell>
                 </TableRow>
               ))}

@@ -5,10 +5,11 @@ import { Button } from "@/components/ui/button";
 import { prisma } from "@/lib/prisma";
 
 export default async function HomePage() {
-  const [supplierCount, catalogCount, imageCount] = await Promise.all([
+  const [supplierCount, catalogCount, pageCount, candidateCount] = await Promise.all([
     prisma.supplier.count(),
     prisma.catalog.count({ where: { status: "READY" } }),
-    prisma.productImage.count(),
+    prisma.catalogPage.count(),
+    prisma.productCandidate.count(),
   ]);
 
   return (
@@ -29,7 +30,7 @@ export default async function HomePage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <div className="rounded-lg border p-4">
           <p className="text-2xl font-bold">{supplierCount}</p>
           <p className="text-sm text-muted-foreground">Fornecedores</p>
@@ -39,8 +40,12 @@ export default async function HomePage() {
           <p className="text-sm text-muted-foreground">Catálogos prontos</p>
         </div>
         <div className="rounded-lg border p-4">
-          <p className="text-2xl font-bold">{imageCount}</p>
-          <p className="text-sm text-muted-foreground">Imagens indexadas</p>
+          <p className="text-2xl font-bold">{pageCount}</p>
+          <p className="text-sm text-muted-foreground">Páginas processadas</p>
+        </div>
+        <div className="rounded-lg border p-4">
+          <p className="text-2xl font-bold">{candidateCount}</p>
+          <p className="text-sm text-muted-foreground">Candidatos indexados</p>
         </div>
       </div>
     </main>

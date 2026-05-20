@@ -1,0 +1,15 @@
+export const FUNCTION_GROUPS: Record<string, string> = {
+  charger: "Carregador",
+  tv_antenna: "Antena de TV",
+  tv_mount: "Suporte de TV",
+  blender_portable: "Liquidificador portátil",
+  cable_usb: "Cabo USB",
+  camera: "Câmera",
+  headphone: "Fone de ouvido",
+  speaker: "Caixa de som",
+  fan: "Ventilador",
+  iron: "Ferro de passar",
+  kettle: "Chaleira",
+  vacuum: "Aspirador",
+  unknown: "Desconhecido",
+};

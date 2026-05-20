@@ -12,11 +12,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Imagem é obrigatória" }, { status: 400 });
   }
 
+  if (!image.type.startsWith("image/")) {
+    return NextResponse.json({ error: "O arquivo deve ser uma imagem" }, { status: 400 });
+  }
+
   if (image.size > MAX_SIZE) {
-    return NextResponse.json(
-      { error: "Imagem deve ter menos de 8MB" },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: "Imagem deve ter menos de 8MB" }, { status: 400 });
   }
 
   const embedding = await generateImageEmbeddingFromFile(image);

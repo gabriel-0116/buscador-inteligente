@@ -34,7 +34,7 @@ async function main() {
   console.log(`Carregando modelo ${MODEL}...`);
   const extractor = (await pipeline("image-feature-extraction", MODEL)) as (
     input: unknown,
-    opts: { pooling: "cls"; normalize: boolean }
+    opts: { pooling: "cls" | "mean" | "none"; normalize: boolean }
   ) => Promise<{ data: ArrayLike<number> }>;
   console.log("Modelo carregado.");
 

@@ -16,36 +16,92 @@ model Supplier {
 }
 
 model Catalog {
-  id         String        @id @default(cuid())
-  supplierId String
-  fileName   String
-  status     CatalogStatus @default(PROCESSING)
-  pageCount  Int?
-  imageCount Int?
-  error      String?
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
+  id             String        @id @default(cuid())
+  supplierId     String
+  fileName       String
+  status         CatalogStatus @default(PROCESSING)
+  pageCount      Int?
+  imageCount     Int?
+  candidateCount Int?
+  error          String?
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
 
-  supplier Supplier       @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  images   ProductImage[]
+  supplier   Supplier           @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  images     ProductImage[]
+  pages      CatalogPage[]
+  candidates ProductCandidate[]
 
   @@index([supplierId])
   @@index([status])
 }
 
+// Legacy — kept for backward compat; not used in the main search pipeline anymore
 model ProductImage {
-  id         String   @id @default(cuid())
-  catalogId  String
-  imageUrl   String
-  width      Int
-  height     Int
-  fileSize   Int?
-  embedding  Unsupported("vector(768)")?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  catalogId String
+  imageUrl  String
+  width     Int
+  height    Int
+  fileSize  Int?
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime @default(now())
 
   catalog Catalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
 
   @@index([catalogId])
+}
+
+model CatalogPage {
+  id         String   @id @default(cuid())
+  catalogId  String
+  pageNumber Int
+  imageUrl   String
+  width      Int
+  height     Int
+  createdAt  DateTime @default(now())
+
+  catalog    Catalog            @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  candidates ProductCandidate[]
+
+  @@index([catalogId])
+  @@unique([catalogId, pageNumber])
+}
+
+model ProductCandidate {
+  id          String               @id @default(cuid())
+  catalogId   String
+  pageId      String?
+  originalUrl String
+  cropUrl     String
+  width       Int
+  height      Int
+  fileSize    Int?
+  sourceType  CandidateSourceType  @default(PAGE_CROP)
+  cropX       Int?
+  cropY       Int?
+  cropWidth   Int?
+  cropHeight  Int?
+
+  detectedLabel String?
+  functionGroup String?
+  confidence    Float?
+
+  embedding Unsupported("vector(768)")?
+  createdAt DateTime                   @default(now())
+
+  catalog Catalog      @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  page    CatalogPage? @relation(fields: [pageId], references: [id], onDelete: SetNull)
+
+  @@index([catalogId])
+  @@index([pageId])
+  @@index([functionGroup])
+}
+
+enum CandidateSourceType {
+  PAGE_CROP
+  EMBEDDED_IMAGE
+  MANUAL
 }
 
 enum CatalogStatus {
