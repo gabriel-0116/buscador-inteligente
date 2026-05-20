@@ -11,6 +11,7 @@ export type SearchResult = {
   detectedLabel: string | null;
   functionGroup: string | null;
   confidence: number | null;
+  qualityScore: number | null;
 };
 
 export function SearchResults({ results }: { results: SearchResult[] }) {
@@ -49,6 +50,11 @@ export function SearchResults({ results }: { results: SearchResult[] }) {
             <p className="mt-0.5 text-xs font-medium text-primary">
               {Math.round(r.similarity * 100)}% similar
             </p>
+            {r.qualityScore != null && (
+              <p className="text-xs text-muted-foreground">
+                qualidade {Math.round(r.qualityScore * 100)}%
+              </p>
+            )}
             <a
               href={r.originalUrl}
               target="_blank"

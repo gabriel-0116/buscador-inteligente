@@ -4,92 +4,289 @@ import { join } from "node:path";
 
 export type DetectedCandidate = {
   imagePath: string;
+  cardImagePath?: string;
   x: number;
   y: number;
   width: number;
   height: number;
   confidence: number;
+  qualityScore: number;
+  isSearchable: boolean;
+  rejectReason?: string;
 };
+
+// ── Constants ────────────────────────────────────────────────────────────────
 
 const MIN_CROP_PX = 180;
 const MIN_AREA_RATIO = 0.03;
-const MAX_CANDIDATES_PER_PAGE = 3;
-// Row/col is a separator if < GAP_DENSITY of pixels are non-white
+const MAX_SEARCHABLE_PER_PAGE = 3;
+const MAX_TOTAL_PER_PAGE = 6;
+const QUALITY_THRESHOLD = 0.50;
+// Separator gap: row/col is a whitespace gap if < this fraction is non-white
 const GAP_DENSITY = 0.04;
-// Minimum consecutive gap rows/cols to count as a separator
 const MIN_GAP_SPAN = 8;
 
 type Box = { x1: number; y1: number; x2: number; y2: number };
 
-function isWhitePixel(data: Buffer, offset: number) {
-  return data[offset] > 244 && data[offset + 1] > 244 && data[offset + 2] > 244;
+// ── Low-level pixel helpers ──────────────────────────────────────────────────
+
+function isWhite(r: number, g: number, b: number) {
+  return r > 240 && g > 240 && b > 240;
 }
 
-function getBoundingBox(
+function isGreen(r: number, g: number, b: number) {
+  return g > 100 && g > r + 40 && g > b + 40;
+}
+
+interface PixelStats {
+  total: number;
+  white: number;
+  green: number;
+  nonWhite: number;
+  whiteRatio: number;
+  greenRatio: number;
+  nonWhiteRatio: number;
+}
+
+function pixelStats(
   data: Buffer,
+  channels: number,
   width: number,
-  height: number,
-  channels: number
-): Box | null {
-  let x1 = width, y1 = height, x2 = 0, y2 = 0;
-  let found = false;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const offset = (y * width + x) * channels;
-      if (!isWhitePixel(data, offset)) {
-        if (x < x1) x1 = x;
-        if (x > x2) x2 = x;
-        if (y < y1) y1 = y;
-        if (y > y2) y2 = y;
-        found = true;
-      }
+  box: Box
+): PixelStats {
+  let white = 0, green = 0, total = 0;
+  for (let y = box.y1; y <= box.y2; y++) {
+    for (let x = box.x1; x <= box.x2; x++) {
+      const off = (y * width + x) * channels;
+      const r = data[off], g = data[off + 1], b = data[off + 2];
+      total++;
+      if (isWhite(r, g, b)) white++;
+      if (isGreen(r, g, b)) green++;
     }
   }
-  return found ? { x1, y1, x2, y2 } : null;
+  const nonWhite = total - white;
+  return {
+    total,
+    white,
+    green,
+    nonWhite,
+    whiteRatio: total > 0 ? white / total : 1,
+    greenRatio: total > 0 ? green / total : 0,
+    nonWhiteRatio: total > 0 ? nonWhite / total : 0,
+  };
 }
 
-function rowDensities(data: Buffer, width: number, channels: number, box: Box): number[] {
+// Fraction of non-white pixels per row within box
+function rowDensities(
+  data: Buffer,
+  channels: number,
+  width: number,
+  box: Box
+): number[] {
   const colCount = box.x2 - box.x1 + 1;
   const result: number[] = [];
   for (let y = box.y1; y <= box.y2; y++) {
     let nonWhite = 0;
     for (let x = box.x1; x <= box.x2; x++) {
-      if (!isWhitePixel(data, (y * width + x) * channels)) nonWhite++;
+      const off = (y * width + x) * channels;
+      if (!isWhite(data[off], data[off + 1], data[off + 2])) nonWhite++;
     }
     result.push(nonWhite / colCount);
   }
   return result;
 }
 
-function colDensities(data: Buffer, width: number, channels: number, box: Box): number[] {
+// Fraction of non-white pixels per column within box
+function colDensities(
+  data: Buffer,
+  channels: number,
+  width: number,
+  box: Box
+): number[] {
   const rowCount = box.y2 - box.y1 + 1;
   const result: number[] = [];
   for (let x = box.x1; x <= box.x2; x++) {
     let nonWhite = 0;
     for (let y = box.y1; y <= box.y2; y++) {
-      if (!isWhitePixel(data, (y * width + x) * channels)) nonWhite++;
+      const off = (y * width + x) * channels;
+      if (!isWhite(data[off], data[off + 1], data[off + 2])) nonWhite++;
     }
     result.push(nonWhite / rowCount);
   }
   return result;
 }
 
-// Returns average "colorfulness" per row (how much color vs grayscale).
-// Product photos tend to be more colorful; logos/text tend to be monochromatic.
-function rowColorfulness(data: Buffer, width: number, channels: number, box: Box): number[] {
-  const colCount = box.x2 - box.x1 + 1;
-  const result: number[] = [];
+// How much content (non-white fraction) is in the central 50% of the box
+function centralMassRatio(
+  data: Buffer,
+  channels: number,
+  width: number,
+  box: Box
+): number {
+  const bW = box.x2 - box.x1 + 1;
+  const bH = box.y2 - box.y1 + 1;
+  const cX = Math.round((box.x1 + box.x2) / 2);
+  const cY = Math.round((box.y1 + box.y2) / 2);
+  const hw = Math.round(bW * 0.25);
+  const hh = Math.round(bH * 0.25);
+  const centerBox: Box = {
+    x1: Math.max(box.x1, cX - hw),
+    y1: Math.max(box.y1, cY - hh),
+    x2: Math.min(box.x2, cX + hw),
+    y2: Math.min(box.y2, cY + hh),
+  };
+  const full = pixelStats(data, channels, width, box);
+  const center = pixelStats(data, channels, width, centerBox);
+  if (full.nonWhite === 0) return 0;
+  return center.nonWhite / full.nonWhite;
+}
+
+// Ratio of dark-to-light transitions per pixel per row → high = text-like
+function estimateTextLikeDensity(
+  data: Buffer,
+  channels: number,
+  width: number,
+  box: Box
+): number {
+  const boxWidth = box.x2 - box.x1 + 1;
+  let totalTransitions = 0;
+  let rowCount = 0;
   for (let y = box.y1; y <= box.y2; y++) {
-    let colorfulness = 0;
+    let transitions = 0;
+    let prevDark = false;
     for (let x = box.x1; x <= box.x2; x++) {
       const off = (y * width + x) * channels;
-      const r = data[off], g = data[off + 1], b = data[off + 2];
-      colorfulness += Math.max(r, g, b) - Math.min(r, g, b);
+      const brightness = (data[off] + data[off + 1] + data[off + 2]) / 3;
+      const isDark = brightness < 140;
+      if (isDark !== prevDark) transitions++;
+      prevDark = isDark;
     }
-    result.push(colorfulness / (255 * colCount));
+    totalTransitions += transitions;
+    rowCount++;
   }
-  return result;
+  return rowCount > 0 ? totalTransitions / (rowCount * boxWidth) : 0;
 }
+
+// ── Quality filter predicates ────────────────────────────────────────────────
+
+function isMostlyWhiteCrop(whiteRatio: number): boolean {
+  return whiteRatio > 0.88;
+}
+
+function isGreenBarDominant(greenRatio: number, aspectRatio: number): boolean {
+  // Horizontal strip with lots of green = catalog price bar
+  return greenRatio > 0.22 && aspectRatio > 1.8;
+}
+
+function isTooHorizontal(aspectRatio: number): boolean {
+  return aspectRatio > 3.5;
+}
+
+function isTooVertical(aspectRatio: number): boolean {
+  return aspectRatio < 0.20;
+}
+
+function hasEnoughVisualMass(nonWhiteRatio: number): boolean {
+  return nonWhiteRatio >= 0.06;
+}
+
+function hasCentralObjectMass(ratio: number): boolean {
+  return ratio >= 0.08;
+}
+
+// ── Main quality evaluator ───────────────────────────────────────────────────
+
+function calculateCropQuality(
+  data: Buffer,
+  channels: number,
+  width: number,
+  box: Box,
+  pageArea: number
+): { score: number; rejectReason?: string } {
+  const bW = box.x2 - box.x1 + 1;
+  const bH = box.y2 - box.y1 + 1;
+  const aspectRatio = bW / bH;
+  const bArea = bW * bH;
+
+  if (bW < MIN_CROP_PX || bH < MIN_CROP_PX) {
+    return { score: 0, rejectReason: "too_small" };
+  }
+  if (isTooHorizontal(aspectRatio)) {
+    return { score: 0, rejectReason: "too_horizontal" };
+  }
+  if (isTooVertical(aspectRatio)) {
+    return { score: 0, rejectReason: "too_vertical" };
+  }
+
+  const stats = pixelStats(data, channels, width, box);
+
+  if (isMostlyWhiteCrop(stats.whiteRatio)) {
+    return { score: 0, rejectReason: "mostly_white" };
+  }
+  if (isGreenBarDominant(stats.greenRatio, aspectRatio)) {
+    return { score: 0, rejectReason: "green_bar" };
+  }
+  if (!hasEnoughVisualMass(stats.nonWhiteRatio)) {
+    return { score: 0, rejectReason: "insufficient_content" };
+  }
+
+  const areaRatio = bArea / pageArea;
+  if (areaRatio > 0.75) {
+    // Full card/page saved only for debug
+    return { score: 0.25, rejectReason: "card_too_large" };
+  }
+
+  const textDensity = estimateTextLikeDensity(data, channels, width, box);
+  const central = centralMassRatio(data, channels, width, box);
+
+  // Penalize extreme aspect ratios gracefully
+  const aspectPenalty = Math.max(0, (aspectRatio - 2.0) * 0.15) + Math.max(0, (1.0 / aspectRatio - 2.0) * 0.15);
+
+  // Text penalty: typical text = 0.05-0.12 transitions/px/row
+  const textPenalty = Math.min(0.50, Math.max(0, textDensity - 0.03) * 8);
+
+  // Green penalty (softer reject for partial green)
+  const greenPenalty = Math.min(0.35, stats.greenRatio * 2);
+
+  // Visual mass score — reward content-rich crops
+  const massScore = Math.min(1.0, stats.nonWhiteRatio * 4.5);
+
+  // Central mass score
+  const centralScore = Math.min(1.0, central * 3.0);
+
+  // Area score: prefer 5-60% of page
+  const areaScore = areaRatio < 0.05
+    ? areaRatio * 15
+    : areaRatio > 0.60
+    ? Math.max(0, 1.0 - (areaRatio - 0.60) * 2)
+    : 1.0;
+
+  const score = Math.max(0, Math.min(0.95,
+    massScore * 0.30 +
+    centralScore * 0.25 +
+    areaScore * 0.20 +
+    (1 - textPenalty) * 0.15 +
+    (1 - aspectPenalty) * 0.10 -
+    greenPenalty
+  ));
+
+  let rejectReason: string | undefined;
+  if (score < QUALITY_THRESHOLD) {
+    if (textDensity > 0.07) rejectReason = "text_like";
+    else if (stats.greenRatio > 0.18) rejectReason = "green_dominant";
+    else if (!hasCentralObjectMass(central)) rejectReason = "no_central_object";
+    else if (areaRatio > 0.60) rejectReason = "card_too_large";
+    else rejectReason = "low_quality";
+  }
+
+  return { score, rejectReason };
+}
+
+function shouldIndexCrop(score: number, rejectReason?: string): boolean {
+  return score >= QUALITY_THRESHOLD && !rejectReason;
+}
+
+// ── Gap detection and region splitting ──────────────────────────────────────
 
 function findGaps(densities: number[], threshold: number, minSpan: number): number[][] {
   const gaps: number[][] = [];
@@ -126,51 +323,92 @@ function gapsToRegions(box: Box, gaps: number[][], axis: "row" | "col"): Box[] {
   );
 }
 
-// For single-product pages: find the most "colorful" horizontal zone (likely the product photo)
-// and return a sub-crop centered on it, removing header logos and footer text.
-function findColorfulZoneCrop(
+function getBoundingBox(
   data: Buffer,
-  anaWidth: number,
   channels: number,
-  globalBox: Box,
-  pageArea: number
-): { box: Box; confidence: number } | null {
-  const colorfulness = rowColorfulness(data, anaWidth, channels, globalBox);
-  const density = rowDensities(data, anaWidth, channels, globalBox);
+  width: number,
+  height: number
+): Box | null {
+  let x1 = width, y1 = height, x2 = 0, y2 = 0;
+  let found = false;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const off = (y * width + x) * channels;
+      if (!isWhite(data[off], data[off + 1], data[off + 2])) {
+        if (x < x1) x1 = x; if (x > x2) x2 = x;
+        if (y < y1) y1 = y; if (y > y2) y2 = y;
+        found = true;
+      }
+    }
+  }
+  return found ? { x1, y1, x2, y2 } : null;
+}
 
-  // Smooth with a window average
-  const windowSize = Math.max(3, Math.round(colorfulness.length * 0.05));
-  const smoothed: number[] = colorfulness.map((_, i) => {
-    const start = Math.max(0, i - windowSize);
-    const end = Math.min(colorfulness.length - 1, i + windowSize);
-    let sum = 0;
-    for (let j = start; j <= end; j++) sum += colorfulness[j] * density[j];
-    return sum / (end - start + 1);
+// ── Search crop extraction from a large card ─────────────────────────────────
+//
+// Strips green rows and header/footer zones to find the "product zone" inside a card.
+// Returns a tighter box if possible, otherwise returns null (caller uses the card).
+
+function extractSearchCropFromCard(
+  data: Buffer,
+  channels: number,
+  width: number,
+  cardBox: Box
+): Box | null {
+  const cardH = cardBox.y2 - cardBox.y1 + 1;
+  if (cardH < MIN_CROP_PX * 2) return null;
+
+  const rDens = rowDensities(data, channels, width, cardBox);
+
+  // Classify each row: 'g'=green, 'w'=white/empty, 'c'=content
+  const rowType: Array<"g" | "w" | "c"> = rDens.map((density, i) => {
+    if (density < 0.03) return "w";
+    const absY = cardBox.y1 + i;
+    let greenCount = 0;
+    for (let x = cardBox.x1; x <= cardBox.x2; x++) {
+      const off = (absY * width + x) * channels;
+      if (isGreen(data[off], data[off + 1], data[off + 2])) greenCount++;
+    }
+    const greenRatio = greenCount / (cardBox.x2 - cardBox.x1 + 1);
+    if (greenRatio > 0.20) return "g";
+    return "c";
   });
 
-  // Find peak colorfulness row
-  let peakIdx = 0;
-  for (let i = 1; i < smoothed.length; i++) {
-    if (smoothed[i] > smoothed[peakIdx]) peakIdx = i;
+  // Find the largest contiguous span of 'c' rows (content, not green, not empty)
+  let bestStart = -1, bestEnd = -1, bestLen = 0;
+  let curStart = -1;
+  for (let i = 0; i <= rowType.length; i++) {
+    const type = rowType[i];
+    if (type === "c") {
+      if (curStart < 0) curStart = i;
+    } else {
+      if (curStart >= 0) {
+        const len = i - curStart;
+        if (len > bestLen) {
+          bestLen = len;
+          bestStart = curStart;
+          bestEnd = i - 1;
+        }
+        curStart = -1;
+      }
+    }
   }
 
-  // Expand window around peak to capture the full product region
-  const totalRows = globalBox.y2 - globalBox.y1 + 1;
-  const targetH = Math.round(totalRows * 0.55);
-  const subY1 = Math.max(0, peakIdx - Math.round(targetH * 0.5));
-  const subY2 = Math.min(smoothed.length - 1, subY1 + targetH - 1);
-  if (subY2 - subY1 < Math.round(totalRows * 0.3)) return null;
+  if (bestStart < 0 || bestLen < MIN_CROP_PX) return null;
 
-  // Convert back to box coordinates
-  const absY1 = globalBox.y1 + subY1;
-  const absY2 = globalBox.y1 + subY2;
-  const subBox = { x1: globalBox.x1, y1: absY1, x2: globalBox.x2, y2: absY2 };
-  const subArea = (subBox.x2 - subBox.x1 + 1) * (subBox.y2 - subBox.y1 + 1);
+  // Only return the sub-crop if it's meaningfully smaller than the card
+  const subFraction = bestLen / cardH;
+  if (subFraction > 0.85) return null; // not worth cropping
 
-  if (subArea / pageArea < MIN_AREA_RATIO) return null;
-
-  return { box: subBox, confidence: 0.60 };
+  return {
+    x1: cardBox.x1,
+    y1: cardBox.y1 + bestStart,
+    x2: cardBox.x2,
+    y2: cardBox.y1 + bestEnd,
+  };
 }
+
+// ── Main export ──────────────────────────────────────────────────────────────
 
 export async function detectProductCandidatesFromPage(args: {
   pageImagePath: string;
@@ -181,7 +419,6 @@ export async function detectProductCandidatesFromPage(args: {
   await mkdir(outputDir, { recursive: true });
 
   const ANALYSIS_WIDTH = 800;
-
   const rawMeta = await sharp(pageImagePath).metadata();
   const origWidth = rawMeta.width ?? 800;
   const origHeight = rawMeta.height ?? 1000;
@@ -200,104 +437,150 @@ export async function detectProductCandidatesFromPage(args: {
   const { channels } = info;
   const pageArea = anaWidth * anaHeight;
 
-  const globalBox = getBoundingBox(data, anaWidth, anaHeight, channels);
+  // Global content bounding box
+  const globalBox = getBoundingBox(data, channels, anaWidth, anaHeight);
   if (!globalBox) return [];
 
-  const contentW = globalBox.x2 - globalBox.x1 + 1;
-  const contentH = globalBox.y2 - globalBox.y1 + 1;
-  if (contentW < MIN_CROP_PX * scale || contentH < MIN_CROP_PX * scale) return [];
-
-  const contentArea = contentW * contentH;
-  const contentRatio = contentArea / pageArea;
-
-  // Try to split by whitespace gaps (works well for multi-product grids)
-  const rDens = rowDensities(data, anaWidth, channels, globalBox);
+  // Split page into distinct regions using whitespace gaps
+  const rDens = rowDensities(data, channels, anaWidth, globalBox);
   const rowGaps = findGaps(rDens, GAP_DENSITY, MIN_GAP_SPAN);
   const rowRegions = rowGaps.length > 0 ? gapsToRegions(globalBox, rowGaps, "row") : [globalBox];
 
-  const boxes: Box[] = [];
+  const allBoxes: Box[] = [];
   for (const rowRegion of rowRegions) {
-    const cDens = colDensities(data, anaWidth, channels, rowRegion);
+    const cDens = colDensities(data, channels, anaWidth, rowRegion);
     const colGaps = findGaps(cDens, GAP_DENSITY, MIN_GAP_SPAN);
-    const cellBoxes = colGaps.length > 0 ? gapsToRegions(rowRegion, colGaps, "col") : [rowRegion];
-    boxes.push(...cellBoxes);
+    const cells = colGaps.length > 0 ? gapsToRegions(rowRegion, colGaps, "col") : [rowRegion];
+    allBoxes.push(...cells);
   }
 
-  // Filter by minimum size
-  const validBoxes = boxes.filter((b) => {
+  // Filter minimum size at analysis resolution
+  const candidateBoxes = allBoxes.filter((b) => {
     const w = b.x2 - b.x1 + 1;
     const h = b.y2 - b.y1 + 1;
-    return (
-      w >= MIN_CROP_PX * scale &&
-      h >= MIN_CROP_PX * scale &&
-      (w * h) / pageArea >= MIN_AREA_RATIO
-    );
+    return w >= MIN_CROP_PX * scale && h >= MIN_CROP_PX * scale && (w * h) / pageArea >= MIN_AREA_RATIO;
   });
 
-  // Score: prefer squarish boxes with reasonable area
-  const scored = validBoxes.map((b) => {
-    const w = b.x2 - b.x1 + 1;
-    const h = b.y2 - b.y1 + 1;
-    const ar = w / h;
-    const aspectScore = ar >= 0.4 && ar <= 2.5 ? 1.0 : 0.4;
-    const areaScore = Math.min(1.0, (w * h) / (0.25 * pageArea));
-    return { box: b, confidence: Math.min(0.92, aspectScore * 0.35 + areaScore * 0.65) };
-  });
-
-  scored.sort((a, b) => b.confidence - a.confidence);
-
-  // If only 1 block found and it covers most of the page → single-product card.
-  // Add a colorfulness-based sub-crop to try to isolate the product photo from logos/text.
-  if (validBoxes.length === 1 && contentRatio > 0.45) {
-    const colorZone = findColorfulZoneCrop(data, anaWidth, channels, globalBox, pageArea);
-    if (colorZone) {
-      // Only add if meaningfully smaller than the main box (actually cropping something)
-      const mainH = globalBox.y2 - globalBox.y1 + 1;
-      const subH = colorZone.box.y2 - colorZone.box.y1 + 1;
-      if (subH < mainH * 0.85) {
-        scored.push(colorZone);
-      }
+  // If no regions found, try the global box as a fallback
+  if (candidateBoxes.length === 0) {
+    const w = globalBox.x2 - globalBox.x1 + 1;
+    const h = globalBox.y2 - globalBox.y1 + 1;
+    if (w >= MIN_CROP_PX * scale && h >= MIN_CROP_PX * scale) {
+      candidateBoxes.push(globalBox);
     }
   }
 
-  scored.sort((a, b) => b.confidence - a.confidence);
-  const topCandidates = scored.slice(0, MAX_CANDIDATES_PER_PAGE);
-
-  // Fallback: use trimmed global box if nothing passed the filters
-  if (topCandidates.length === 0) {
-    const pad = Math.round(8 * scale);
-    topCandidates.push({
-      box: {
-        x1: Math.max(0, globalBox.x1 - pad),
-        y1: Math.max(0, globalBox.y1 - pad),
-        x2: Math.min(anaWidth - 1, globalBox.x2 + pad),
-        y2: Math.min(anaHeight - 1, globalBox.y2 + pad),
-      },
-      confidence: 0.20,
-    });
+  // For each detected region: evaluate quality + attempt inner search crop
+  interface ScoredRegion {
+    searchBox: Box;
+    cardBox?: Box;
+    qualityResult: ReturnType<typeof calculateCropQuality>;
+    confidence: number;
   }
 
+  const scoredRegions: ScoredRegion[] = [];
+
+  for (const box of candidateBoxes) {
+    const areaRatio = ((box.x2 - box.x1 + 1) * (box.y2 - box.y1 + 1)) / pageArea;
+    const isLargeCard = areaRatio > 0.35;
+
+    if (isLargeCard) {
+      // Try to extract a tighter product crop from within the card
+      const innerBox = extractSearchCropFromCard(data, channels, anaWidth, box);
+      if (innerBox) {
+        const qInner = calculateCropQuality(data, channels, anaWidth, innerBox, pageArea);
+        scoredRegions.push({
+          searchBox: innerBox,
+          cardBox: box,
+          qualityResult: qInner,
+          confidence: 0.65,
+        });
+      } else {
+        // Use the card itself, but it will be flagged card_too_large if > 75%
+        const qCard = calculateCropQuality(data, channels, anaWidth, box, pageArea);
+        scoredRegions.push({ searchBox: box, qualityResult: qCard, confidence: 0.40 });
+      }
+    } else {
+      const q = calculateCropQuality(data, channels, anaWidth, box, pageArea);
+      scoredRegions.push({ searchBox: box, qualityResult: q, confidence: 0.75 });
+    }
+  }
+
+  // Sort: searchable first, then by score desc
+  scoredRegions.sort((a, b) => {
+    const aSearch = shouldIndexCrop(a.qualityResult.score, a.qualityResult.rejectReason) ? 1 : 0;
+    const bSearch = shouldIndexCrop(b.qualityResult.score, b.qualityResult.rejectReason) ? 1 : 0;
+    if (aSearch !== bSearch) return bSearch - aSearch;
+    return b.qualityResult.score - a.qualityResult.score;
+  });
+
+  // Cap: max MAX_SEARCHABLE_PER_PAGE searchable + up to MAX_TOTAL_PER_PAGE total
+  let searchableCount = 0;
+  const finalRegions: typeof scoredRegions = [];
+  for (const r of scoredRegions) {
+    if (finalRegions.length >= MAX_TOTAL_PER_PAGE) break;
+    const isS = shouldIndexCrop(r.qualityResult.score, r.qualityResult.rejectReason);
+    if (isS && searchableCount >= MAX_SEARCHABLE_PER_PAGE) continue;
+    if (isS) searchableCount++;
+    finalRegions.push(r);
+  }
+
+  // Crop and save images
   const results: DetectedCandidate[] = [];
   let cropIndex = 1;
 
-  for (const { box, confidence } of topCandidates) {
-    const x = Math.round(box.x1 / scale);
-    const y = Math.round(box.y1 / scale);
-    const w = Math.min(origWidth - x, Math.round((box.x2 - box.x1 + 1) / scale));
-    const h = Math.min(origHeight - y, Math.round((box.y2 - box.y1 + 1) / scale));
+  for (const { searchBox, cardBox, qualityResult, confidence } of finalRegions) {
+    // Scale back to original resolution
+    const toOrig = (v: number) => Math.round(v / scale);
+    const clampX = (v: number) => Math.max(0, Math.min(origWidth - 1, v));
+    const clampY = (v: number) => Math.max(0, Math.min(origHeight - 1, v));
 
-    if (w < MIN_CROP_PX || h < MIN_CROP_PX) continue;
+    const sx = clampX(toOrig(searchBox.x1));
+    const sy = clampY(toOrig(searchBox.y1));
+    const sw = Math.max(1, Math.min(origWidth - sx, toOrig(searchBox.x2 - searchBox.x1 + 1)));
+    const sh = Math.max(1, Math.min(origHeight - sy, toOrig(searchBox.y2 - searchBox.y1 + 1)));
 
-    const fileName = `page-${String(pageNumber).padStart(3, "0")}-crop-${String(cropIndex).padStart(2, "0")}.jpg`;
-    const imagePath = join(outputDir, fileName);
+    if (sw < MIN_CROP_PX || sh < MIN_CROP_PX) continue;
+
+    const prefix = `page-${String(pageNumber).padStart(3, "0")}-crop-${String(cropIndex).padStart(2, "0")}`;
+    const imagePath = join(outputDir, `${prefix}.jpg`);
 
     await sharp(pageImagePath)
-      .extract({ left: x, top: y, width: w, height: h })
+      .extract({ left: sx, top: sy, width: sw, height: sh })
       .flatten({ background: { r: 255, g: 255, b: 255 } })
       .jpeg({ quality: 90 })
       .toFile(imagePath);
 
-    results.push({ imagePath, x, y, width: w, height: h, confidence });
+    let cardImagePath: string | undefined;
+    if (cardBox) {
+      const cx = clampX(toOrig(cardBox.x1));
+      const cy = clampY(toOrig(cardBox.y1));
+      const cw = Math.max(1, Math.min(origWidth - cx, toOrig(cardBox.x2 - cardBox.x1 + 1)));
+      const ch = Math.max(1, Math.min(origHeight - cy, toOrig(cardBox.y2 - cardBox.y1 + 1)));
+
+      if (cw >= MIN_CROP_PX && ch >= MIN_CROP_PX) {
+        cardImagePath = join(outputDir, `${prefix}-card.jpg`);
+        await sharp(pageImagePath)
+          .extract({ left: cx, top: cy, width: cw, height: ch })
+          .flatten({ background: { r: 255, g: 255, b: 255 } })
+          .jpeg({ quality: 85 })
+          .toFile(cardImagePath);
+      }
+    }
+
+    const isSearchable = shouldIndexCrop(qualityResult.score, qualityResult.rejectReason);
+
+    results.push({
+      imagePath,
+      cardImagePath,
+      x: sx, y: sy,
+      width: sw, height: sh,
+      confidence,
+      qualityScore: qualityResult.score,
+      isSearchable,
+      rejectReason: qualityResult.rejectReason,
+    });
+
     cropIndex++;
   }
 

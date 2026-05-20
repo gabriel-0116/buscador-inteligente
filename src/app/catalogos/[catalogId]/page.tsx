@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { Badge } from "@/components/ui/badge";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { DeleteCatalogButton } from "@/components/delete-catalog-button";
+import { ReprocessCatalogButton } from "@/components/reprocess-catalog-button";
 
 type Props = { params: Promise<{ catalogId: string }> };
 
@@ -18,6 +19,20 @@ const statusVariant: Record<string, "default" | "secondary" | "destructive"> = {
   PROCESSING: "secondary",
   READY: "default",
   FAILED: "destructive",
+};
+
+const rejectLabel: Record<string, string> = {
+  too_small: "muito pequeno",
+  too_horizontal: "muito horizontal",
+  too_vertical: "muito vertical",
+  mostly_white: "quase branco",
+  green_bar: "faixa verde",
+  green_dominant: "verde dominante",
+  insufficient_content: "sem conteúdo",
+  card_too_large: "card inteiro",
+  text_like: "texto/tabela",
+  no_central_object: "sem objeto central",
+  low_quality: "baixa qualidade",
 };
 
 export default async function CatalogPage({ params }: Props) {
@@ -35,6 +50,7 @@ export default async function CatalogPage({ params }: Props) {
         select: {
           id: true,
           cropUrl: true,
+          cardUrl: true,
           originalUrl: true,
           pageId: true,
           width: true,
@@ -45,14 +61,20 @@ export default async function CatalogPage({ params }: Props) {
           cropWidth: true,
           cropHeight: true,
           confidence: true,
+          qualityScore: true,
+          isSearchable: true,
+          rejectReason: true,
           detectedLabel: true,
         },
-        orderBy: { createdAt: "asc" },
+        orderBy: [{ isSearchable: "desc" }, { qualityScore: "desc" }],
       },
     },
   });
 
   if (!catalog) notFound();
+
+  const searchableCount = catalog.candidates.filter((c) => c.isSearchable).length;
+  const debugCount = catalog.candidates.length - searchableCount;
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-8 p-6">
@@ -69,12 +91,18 @@ export default async function CatalogPage({ params }: Props) {
           {" / "}
           {catalog.fileName}
         </p>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-3xl font-semibold">{catalog.fileName}</h1>
           <Badge variant={statusVariant[catalog.status]}>
             {statusLabel[catalog.status]}
           </Badge>
-          <div className="ml-auto">
+          <div className="ml-auto flex gap-2">
+            {catalog.status === "READY" && (
+              <ReprocessCatalogButton
+                catalogId={catalogId}
+                hasPdf={!!catalog.pdfStoragePath}
+              />
+            )}
             <DeleteCatalogButton
               catalogId={catalogId}
               redirectTo={`/fornecedores/${catalog.supplier.id}`}
@@ -92,19 +120,24 @@ export default async function CatalogPage({ params }: Props) {
       {/* Stats */}
       <div className="flex flex-wrap gap-6 text-sm text-muted-foreground">
         <span>
-          Fornecedor:{" "}
-          <strong className="text-foreground">{catalog.supplier.name}</strong>
+          Fornecedor: <strong className="text-foreground">{catalog.supplier.name}</strong>
         </span>
         {catalog.pageCount != null && (
-          <span>
-            Páginas:{" "}
-            <strong className="text-foreground">{catalog.pageCount}</strong>
-          </span>
+          <span>Páginas: <strong className="text-foreground">{catalog.pageCount}</strong></span>
         )}
         {catalog.candidateCount != null && (
           <span>
-            Candidatos indexados:{" "}
-            <strong className="text-foreground">{catalog.candidateCount}</strong>
+            Candidatos: <strong className="text-foreground">{catalog.candidateCount}</strong>
+            {" · "}
+            <span className="text-green-600 font-medium">{searchableCount} pesquisáveis</span>
+            {debugCount > 0 && (
+              <span className="text-muted-foreground"> · {debugCount} debug</span>
+            )}
+          </span>
+        )}
+        {!catalog.pdfStoragePath && catalog.status === "READY" && (
+          <span className="text-amber-600 text-xs">
+            ⚠ PDF original não salvo — reprocessamento requer reenvio do arquivo.
           </span>
         )}
       </div>
@@ -115,7 +148,7 @@ export default async function CatalogPage({ params }: Props) {
 
       {catalog.status === "READY" && (
         <>
-          {/* Pages section */}
+          {/* Pages */}
           {catalog.pages.length > 0 && (
             <section className="flex flex-col gap-3">
               <h2 className="text-xl font-semibold">
@@ -128,7 +161,7 @@ export default async function CatalogPage({ params }: Props) {
                     href={page.imageUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="group relative overflow-hidden rounded-md border bg-muted transition-opacity hover:opacity-90"
+                    className="overflow-hidden rounded-md border bg-muted transition-opacity hover:opacity-90"
                   >
                     <div className="relative aspect-[3/4]">
                       <Image
@@ -148,60 +181,93 @@ export default async function CatalogPage({ params }: Props) {
             </section>
           )}
 
-          {/* Candidates section */}
+          {/* Candidates */}
           <section className="flex flex-col gap-3">
             <h2 className="text-xl font-semibold">
               Candidatos extraídos ({catalog.candidates.length})
             </h2>
             {catalog.candidates.length === 0 ? (
               <p className="py-8 text-center text-muted-foreground">
-                Nenhum candidato detectado.
+                Nenhum candidato detectado. Tente reprocessar.
               </p>
             ) : (
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
                 {catalog.candidates.map((c) => (
                   <div
                     key={c.id}
-                    className="overflow-hidden rounded-lg border bg-card"
+                    className={`overflow-hidden rounded-lg border bg-card ${
+                      c.isSearchable ? "border-green-500/40" : "opacity-70"
+                    }`}
                   >
-                    <a
-                      href={c.cropUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block"
-                    >
+                    <a href={c.cropUrl} target="_blank" rel="noopener noreferrer" className="block">
                       <div className="relative aspect-square bg-muted">
                         <Image
                           src={c.cropUrl}
-                          alt="Candidato de produto"
+                          alt="Candidato"
                           fill
                           className="object-contain p-1"
                           sizes="(max-width: 640px) 50vw, 20vw"
                         />
                       </div>
                     </a>
-                    <div className="border-t p-2 flex flex-col gap-0.5 text-xs text-muted-foreground">
-                      {c.detectedLabel && (
-                        <p className="font-medium text-foreground">{c.detectedLabel}</p>
-                      )}
-                      <p>{c.width}×{c.height}px</p>
-                      {c.confidence != null && (
-                        <p>Confiança: {Math.round(c.confidence * 100)}%</p>
-                      )}
-                      <p className="capitalize">{c.sourceType.toLowerCase().replace("_", " ")}</p>
-                      {c.cropX != null && (
-                        <p className="text-xs opacity-60">
-                          crop ({c.cropX},{c.cropY}) {c.cropWidth}×{c.cropHeight}
-                        </p>
-                      )}
-                      <a
-                        href={c.originalUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="underline-offset-2 hover:underline"
-                      >
-                        Ver página original
-                      </a>
+                    <div className="border-t p-2 flex flex-col gap-1 text-xs">
+                      {/* Searchable badge */}
+                      <div className="flex flex-wrap gap-1">
+                        {c.isSearchable ? (
+                          <span className="rounded bg-green-100 px-1.5 py-0.5 text-green-700 font-medium">
+                            Busca: SIM
+                          </span>
+                        ) : (
+                          <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground font-medium">
+                            Debug
+                          </span>
+                        )}
+                        {c.rejectReason && (
+                          <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
+                            {rejectLabel[c.rejectReason] ?? c.rejectReason}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Scores */}
+                      <div className="flex gap-2 text-muted-foreground">
+                        {c.qualityScore != null && (
+                          <span>qual. {Math.round(c.qualityScore * 100)}%</span>
+                        )}
+                        {c.confidence != null && (
+                          <span>conf. {Math.round(c.confidence * 100)}%</span>
+                        )}
+                      </div>
+
+                      {/* Dimensions */}
+                      <p className="text-muted-foreground">{c.width}×{c.height}px</p>
+
+                      {/* Source type */}
+                      <p className="text-muted-foreground capitalize">
+                        {c.sourceType.toLowerCase().replace("_", " ")}
+                      </p>
+
+                      {/* Links */}
+                      <div className="flex flex-col gap-0.5 mt-0.5">
+                        <a
+                          href={c.originalUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline-offset-2 hover:underline text-muted-foreground"
+                        >
+                          Página original
+                        </a>
+                        {c.cardUrl && (
+                          <a
+                            href={c.cardUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline-offset-2 hover:underline text-muted-foreground"
+                          >
+                            Card completo
+                          </a>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}

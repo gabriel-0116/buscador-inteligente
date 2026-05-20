@@ -11,10 +11,11 @@ export type SearchResult = {
   detectedLabel: string | null;
   functionGroup: string | null;
   confidence: number | null;
+  qualityScore: number | null;
 };
 
-// Minimum cosine similarity gap to treat two results as near-duplicates
 const DEDUP_THRESHOLD = 0.97;
+const MIN_QUALITY = 0.50;
 
 export async function searchSimilarImages(
   embedding: number[]
@@ -32,6 +33,7 @@ export async function searchSimilarImages(
       pc."detectedLabel",
       pc."functionGroup",
       pc.confidence,
+      pc."qualityScore",
       (1 - (pc.embedding <=> ${vectorStr}::vector))::float8 AS similarity,
       c."fileName" AS "catalogFileName",
       s.name AS "supplierName"
@@ -39,6 +41,8 @@ export async function searchSimilarImages(
     JOIN "Catalog" c ON c.id = pc."catalogId"
     JOIN "Supplier" s ON s.id = c."supplierId"
     WHERE pc.embedding IS NOT NULL
+      AND pc."isSearchable" = true
+      AND pc."qualityScore" >= ${MIN_QUALITY}
     ORDER BY
       CASE WHEN pc."sourceType" = 'PAGE_CROP' THEN 0 ELSE 1 END,
       pc.embedding <=> ${vectorStr}::vector
@@ -50,15 +54,13 @@ export async function searchSimilarImages(
     similarity: Number(r.similarity),
   }));
 
-  // Deduplicate: skip candidates from the same catalog whose cropUrl matches
-  // or whose similarity is extremely close (same crop uploaded more than once)
+  // Deduplicate by cropUrl and near-identical similarity within same catalog
   const seenUrls = new Set<string>();
   const selected: SearchResult[] = [];
 
   for (const candidate of candidates) {
     if (seenUrls.has(candidate.cropUrl)) continue;
 
-    // Also dedup by near-identical similarity within the same catalog
     let isDupe = false;
     for (const prev of selected) {
       if (

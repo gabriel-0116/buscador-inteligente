@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pnpm dev          # dev server (uses webpack, not turbopack)
-pnpm build        # production build
+pnpm build        # production build (also uses webpack)
 pnpm lint         # eslint
 pnpm format       # prettier write
 pnpm format:check # prettier check
@@ -17,8 +17,9 @@ npx prisma migrate deploy # apply migrations in production
 npx prisma generate       # regenerate client after schema changes
 npx prisma studio         # local DB browser
 
-# Re-index legacy ProductImage records (not used for search anymore)
-npx tsx scripts/reindex.ts
+# Debug scripts
+npx tsx scripts/reindex.ts        # re-index legacy ProductImage records (not used for search anymore)
+npx tsx scripts/test-detector.ts  # exercise the candidate detector on a local page image
 ```
 
 ## Architecture
@@ -29,31 +30,45 @@ npx tsx scripts/reindex.ts
 
 ### Data flow
 
-1. **Catalog upload** (`POST /api/catalogs`): receives PDF via FormData, saves to `/tmp`, runs `pdftoppm -jpeg -r 180` to render each page as a JPEG, uploads pages to Supabase Storage (`{catalogId}/pages/page-NNN.jpg`), runs `detectProductCandidatesFromPage` on each page to generate crop candidates, uploads crops to `{catalogId}/candidates/candidate-NNNN.jpg`, generates DINOv2 embeddings (768-dim CLS token) for each crop, inserts `CatalogPage` and `ProductCandidate` rows, updates `Catalog.status → READY`. Processing runs fire-and-forget.
+1. **Catalog upload** (`POST /api/catalogs`): receives PDF via FormData, saves it to `/tmp`, fires `processCatalog` (fire-and-forget). `processCatalog` uploads the original PDF to Supabase Storage at `{catalogId}/original/catalog.pdf` (so the catalog can be reprocessed later), renders each page with `pdftoppm -jpeg -r 180`, uploads pages to `{catalogId}/pages/page-NNN.jpg`, runs `detectProductCandidatesFromPage` per page to produce crop candidates, uploads crops to `{catalogId}/candidates/candidate-NNNN.jpg` (and optionally `card-NNNN.jpg` for the surrounding card), inserts `CatalogPage` + `ProductCandidate` rows. **Embeddings are only generated when `candidate.isSearchable && candidate.qualityScore >= 0.50`** — rejected crops are kept for debug with `embedding = NULL`. Final step sets `Catalog.status → READY`.
 
-2. **Visual search** (`POST /api/search`): receives image via FormData, generates DINOv2 embedding, queries pgvector with cosine distance over `ProductCandidate`, returns top 20 with `cropUrl`, `originalUrl`, `similarity`, `supplierName`, `catalogFileName`.
+2. **Visual search** (`POST /api/search`): receives image via FormData, generates a DINOv2 embedding, queries `ProductCandidate` with pgvector cosine distance, filtering on `embedding IS NOT NULL AND isSearchable = true AND qualityScore >= 0.50`. Results are sorted to prefer `PAGE_CROP` over other source types, deduped by `cropUrl` and near-identical similarity within the same catalog, capped at 20.
+
+3. **Reprocess** (`POST /api/catalogs/[catalogId]/reprocess`): deletes old `ProductCandidate` + `CatalogPage` rows + their storage files, downloads the original PDF from `pdfStoragePath`, writes to `/tmp`, and re-runs `processCatalog`. Requires `Catalog.pdfStoragePath` to be set — catalogs uploaded before that field existed must be re-uploaded.
 
 ### Storage layout
 
 ```
 product-images/
   {catalogId}/
+    original/     ← original PDF (used for reprocessing)
     pages/        ← full rendered pages (source/debug)
-    candidates/   ← product crop regions (used for search)
+    candidates/   ← product crops + optional `card-NNNN.jpg` per candidate
     embedded/     ← legacy pdfimages output (not used for search)
 ```
+
+### Quality gate (what enters the search index)
+
+The detector (`detect-product-candidates.ts`) is the *only* gate that decides whether a crop is searchable. The pipeline trusts its `isSearchable` + `qualityScore` flags — `process-catalog.ts` does not re-evaluate them, it only skips embedding generation when they fail.
+
+Rejection reasons (`rejectReason`) currently emitted by the detector include `green_bar`, `mostly_white`, `too_horizontal`, `too_vertical`, `text_like`, `card_too_large`/`page_like_crop`, and `low_visual_mass`. Per-page caps: max 3 searchable, max 6 total (best by `qualityScore` win).
+
+Hard constraint: a `ProductCandidate` with `isSearchable = false` must never have an embedding. The search query also enforces `isSearchable = true` server-side — do not rely on UI filtering.
 
 ### pgvector queries
 
 Prisma does not support vector operations natively. All similarity queries use raw SQL:
 
 ```typescript
+const vectorStr = `[${embedding.join(",")}]`;
 const results = await prisma.$queryRaw`
   SELECT pc.id, pc."cropUrl", pc."originalUrl", pc."catalogId",
-         1 - (pc.embedding <=> ${queryVector}::vector) as similarity
+         (1 - (pc.embedding <=> ${vectorStr}::vector))::float8 AS similarity
   FROM "ProductCandidate" pc
   WHERE pc.embedding IS NOT NULL
-  ORDER BY pc.embedding <=> ${queryVector}::vector
+    AND pc."isSearchable" = true
+    AND pc."qualityScore" >= 0.50
+  ORDER BY pc.embedding <=> ${vectorStr}::vector
   LIMIT 100
 `;
 ```
@@ -77,23 +92,32 @@ return normalizeVector(clsToken);
 | File | Role |
 |---|---|
 | `src/features/catalog-processing/render-pages.ts` | Renders PDF pages via `pdftoppm` |
-| `src/features/catalog-processing/detect-product-candidates.ts` | Heuristic crop detector using sharp pixel analysis |
-| `src/features/catalog-processing/process-catalog.ts` | Main pipeline: render → detect → upload → embed |
+| `src/features/catalog-processing/detect-product-candidates.ts` | Detector + quality filters (green-bar, white-ratio, aspect-ratio, text-density, card-vs-search-crop). Returns `DetectedCandidate` with `isSearchable` + `qualityScore` + `rejectReason` |
+| `src/features/catalog-processing/process-catalog.ts` | Main pipeline: save PDF to storage → render → detect → upload crops → conditionally embed |
 | `src/features/catalog-processing/function-groups.ts` | Static product function group labels (prepared for future classification) |
 | `src/features/visual-search/embeddings.ts` | DINOv2 model singleton + embedding helpers |
-| `src/features/visual-search/search.ts` | pgvector search over `ProductCandidate` |
+| `src/features/visual-search/search.ts` | pgvector search; filters `isSearchable + qualityScore`, prefers PAGE_CROP, dedupes |
+| `src/app/api/catalogs/route.ts` | Upload PDF, create `Catalog`, fire-and-forget `processCatalog` |
+| `src/app/api/catalogs/[catalogId]/reprocess/route.ts` | Wipe candidates+pages+storage, redownload PDF, re-run pipeline |
 | `src/lib/prisma.ts` | Prisma client singleton (cached on `globalThis` for dev HMR) |
 | `src/lib/supabase.ts` | Supabase admin client + `getPublicImageUrl()` + `uploadImageToStorage()` |
 | `prisma/schema.prisma` | Models: `Supplier → Catalog → CatalogPage → ProductCandidate`; `ProductImage` kept as legacy |
 | `prisma.config.ts` | Prisma CLI config — uses `DIRECT_URL` env var for migrations |
 | `next.config.ts` | Marks `@xenova/transformers`, `onnxruntime-node`, `sharp` as `serverExternalPackages`; allows `*.supabase.co` image hostnames |
+| `src/instrumentation.ts` | Preloads the DINOv2 model on server startup so the first search isn't cold |
 
 ### Schema models
 
 - **Supplier** → many **Catalog**
-- **Catalog** → many **CatalogPage** (full rendered pages) + many **ProductCandidate** (indexed crops)
-- **CatalogPage** → many **ProductCandidate**
-- **ProductCandidate** — has `cropUrl` (cropped image), `originalUrl` (page it came from), `embedding vector(768)`, `confidence`, `cropX/Y/Width/Height` metadata, `detectedLabel`, `functionGroup` (prepared for future classification)
+- **Catalog** → many **CatalogPage** + many **ProductCandidate**. Has `pdfStoragePath` pointing at the original PDF in Supabase Storage (required for reprocessing).
+- **CatalogPage** → many **ProductCandidate** (the rendered page each candidate came from)
+- **ProductCandidate** — searchable image crop. Key fields:
+  - `cropUrl` — image used for search/results (and for embedding when `isSearchable`)
+  - `cardUrl` — optional larger surrounding card region (debug/reference)
+  - `originalUrl` — page the crop came from
+  - `embedding vector(768)` — **NULL unless `isSearchable && qualityScore >= 0.50`**
+  - `isSearchable Boolean` (default `false`), `qualityScore Float?`, `rejectReason String?`
+  - `confidence`, `cropX/Y/Width/Height`, `sourceType`, `detectedLabel`, `functionGroup`
 - **ProductImage** — legacy, not used in search; kept to avoid data loss
 
 ### Environment variables
@@ -113,7 +137,7 @@ SUPABASE_SERVICE_ROLE_KEY   # required for server-side storage uploads
 | `/` | Home with stats: suppliers, catalogs, pages processed, candidates indexed |
 | `/fornecedores` | Supplier list + create supplier |
 | `/fornecedores/[supplierId]` | Supplier detail + PDF upload |
-| `/catalogos/[catalogId]` | Debug view: rendered pages + extracted candidates with crop metadata |
+| `/catalogos/[catalogId]` | Debug view: rendered pages + extracted candidates. Shows `isSearchable` badge, `qualityScore`, `rejectReason`, `cardUrl`, crop metadata — primary tool for tuning the detector |
 | `/busca` | Search page (image upload → similarity results using cropUrl) |
 
 ### Deploy target

@@ -24,15 +24,9 @@ export async function POST(request: Request) {
     );
   }
 
-  const supplier = await prisma.supplier.findUnique({
-    where: { id: supplierId },
-  });
-
+  const supplier = await prisma.supplier.findUnique({ where: { id: supplierId } });
   if (!supplier) {
-    return NextResponse.json(
-      { error: "Fornecedor não encontrado" },
-      { status: 404 }
-    );
+    return NextResponse.json({ error: "Fornecedor não encontrado" }, { status: 404 });
   }
 
   const catalog = await prisma.catalog.create({
@@ -43,7 +37,7 @@ export async function POST(request: Request) {
   const pdfPath = join(tmpdir(), `${catalog.id}.pdf`);
   await writeFile(pdfPath, pdfBuffer);
 
-  // Fire-and-forget: Railway runs a persistent Node server, so this completes
+  // Fire-and-forget: processCatalog also saves the PDF to Supabase Storage
   processCatalog(catalog.id, pdfPath).catch(console.error);
 
   return NextResponse.json(catalog, { status: 201 });
