@@ -2,6 +2,7 @@ import { rm, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import sharp from "sharp";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { uploadImageToStorage, supabaseAdmin } from "@/lib/supabase";
 import { generateImageEmbeddingFromPath } from "@/features/visual-search/embeddings";
@@ -65,11 +66,36 @@ export async function processCatalog(
         pageCount++;
 
         // ── Detect candidates ───────────────────────────────────────────────
-        const candidates = await detectProductCandidatesFromPage({
+        const { candidates, pageAnalysis } = await detectProductCandidatesFromPage({
           pageImagePath: imagePath,
           outputDir: candidatesDir,
           pageNumber,
         });
+
+        // Persist the raw analysis for auditing / future retries.
+        if (pageAnalysis.rawJson !== undefined || pageAnalysis.error) {
+          try {
+            await prisma.pageAnalysis.create({
+              data: {
+                catalogId,
+                pageId: catalogPage.id,
+                pageNumber,
+                provider: pageAnalysis.provider,
+                model: pageAnalysis.model,
+                productsCount: pageAnalysis.productsCount,
+                error: pageAnalysis.error,
+                rawJson:
+                  (pageAnalysis.rawJson as Prisma.InputJsonValue | undefined) ??
+                  ({ products: [] } as Prisma.InputJsonValue),
+              },
+            });
+          } catch (err) {
+            console.error(
+              `Erro ao salvar PageAnalysis (pág. ${pageNumber}):`,
+              err
+            );
+          }
+        }
 
         for (const candidate of candidates) {
           try {
@@ -116,11 +142,25 @@ export async function processCatalog(
                 isSearchable: candidate.isSearchable,
                 qualityScore: candidate.qualityScore,
                 rejectReason: candidate.rejectReason,
+                // Vision-detector metadata (undefined when heuristic-only).
+                productName: candidate.productName,
+                productNamePt: candidate.productNamePt,
+                category: candidate.category,
+                functionGroup: candidate.functionGroup,
+                model: candidate.model,
+                originalText: candidate.originalText,
+                descriptionPt: candidate.descriptionPt,
+                sourceDetector: candidate.sourceDetector,
+                visionConfidence: candidate.visionConfidence,
+                rawVisionJson: candidate.rawVisionJson as
+                  | Prisma.InputJsonValue
+                  | undefined,
               },
             });
 
-            // Only generate embedding for searchable crops with sufficient quality
-            if (candidate.isSearchable && candidate.qualityScore >= 0.50) {
+            // Only generate embedding for searchable crops with sufficient quality.
+            // The gate matches detect-product-candidates' QUALITY_THRESHOLD (0.60).
+            if (candidate.isSearchable && candidate.qualityScore >= 0.6) {
               const embedding = await generateImageEmbeddingFromPath(candidate.imagePath);
               const vectorStr = `[${embedding.join(",")}]`;
               await prisma.$executeRaw`

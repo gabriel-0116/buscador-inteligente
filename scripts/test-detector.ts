@@ -21,11 +21,19 @@ async function main() {
   console.log(`Analisando: ${imagePath}`);
   console.log(`Saída em: ${outputDir}\n`);
 
-  const candidates = await detectProductCandidatesFromPage({
+  const { candidates, pageAnalysis } = await detectProductCandidatesFromPage({
     pageImagePath: imagePath,
     outputDir,
     pageNumber: 1,
   });
+
+  console.log(
+    `Detector: ${pageAnalysis.sourceDetector}` +
+      (pageAnalysis.provider ? ` (${pageAnalysis.provider}/${pageAnalysis.model})` : "") +
+      ` — raw=${pageAnalysis.productsCount}` +
+      (pageAnalysis.error ? ` error="${pageAnalysis.error}"` : "")
+  );
+  console.log();
 
   if (candidates.length === 0) {
     console.log("Nenhum candidato detectado.");
@@ -36,6 +44,19 @@ async function main() {
       console.log(`  Posição: (${c.x}, ${c.y})`);
       console.log(`  Dimensões: ${c.width}×${c.height}`);
       console.log(`  Confiança: ${Math.round(c.confidence * 100)}%`);
+      console.log(`  Qualidade: ${Math.round(c.qualityScore * 100)}%`);
+      console.log(
+        `  Pesquisável: ${c.isSearchable}` +
+          (c.rejectReason ? ` (motivo: ${c.rejectReason})` : "")
+      );
+      if (c.productNamePt || c.productName) {
+        console.log(`  Produto: ${c.productNamePt ?? c.productName}`);
+      }
+      if (c.category || c.functionGroup) {
+        console.log(
+          `  Categoria: ${[c.category, c.functionGroup].filter(Boolean).join(" · ")}`
+        );
+      }
     });
   }
 }

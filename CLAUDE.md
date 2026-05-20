@@ -26,7 +26,7 @@ npx tsx scripts/test-detector.ts  # exercise the candidate detector on a local p
 
 **Purpose:** Internal image-similarity search tool — upload supplier PDF catalogs, detect product regions, search by image.
 
-**Stack:** Next.js 16 App Router · TypeScript · Tailwind v4 · shadcn/ui · Supabase (PostgreSQL + Storage) · Prisma 7 · DINOv2 embeddings via `@xenova/transformers`
+**Stack:** Next.js 16 App Router · TypeScript · Tailwind v4 · shadcn/ui · Supabase (PostgreSQL + Storage) · Prisma 7 · DINOv2 embeddings via `@xenova/transformers` · Multimodal vision detector (Anthropic Claude or OpenAI GPT-4o, configurable)
 
 ### Data flow
 
@@ -47,21 +47,27 @@ product-images/
     embedded/     ← legacy pdfimages output (not used for search)
 ```
 
-### Quality gate (what enters the search index)
+### Detection pipeline (vision-first, heuristic fallback)
 
-The detector (`detect-product-candidates.ts`) is the *only* gate that decides whether a crop is searchable. The pipeline trusts its `isSearchable` + `qualityScore` flags — `process-catalog.ts` does not re-evaluate them, it only skips embedding generation when they fail.
+`detectProductCandidatesFromPage()` is the orchestrator. Per page:
 
-**Detection strategy (MVP):** "1 catalog card = 1 ProductCandidate." The detector splits each page into a grid of cells via whitespace gaps (row-then-column), evaluates each cell as a *card*, and uses the whole card as the searchable crop. There is no inner-object cropping — when a card passes filters, `cropUrl` *is* the card. `process-catalog.ts` mirrors `cropUrl` into `cardUrl` for parity in the schema.
+1. **If `VISION_DETECTOR_*` env vars are set**: send the rendered page to the configured multimodal model and parse a strict JSON response listing products + bounding boxes + product metadata (name, category, functionGroup, model, description). See `vision-json-detector.ts` and the Zod schemas in `product-json-schema.ts`.
+2. **Validate boxes** (`vision-box-validator.ts`): clamp to page bounds (also detects normalized 0-1 coords), reject `too_small`/`too_large`/`header_footer`/`horizontal_bar`/`vertical_column`, then `dedupeBoxesByIoU(0.65)` — when two boxes overlap a lot, the higher-confidence one wins.
+3. **Crop + local quality**: for each surviving box, extract the crop at original resolution, then run `evaluateCropImageQuality()` (a page-context-free version of the card scorer) to compute `qualityScore`. `isSearchable = true` requires `qualityScore >= 0.60 && visionConfidence >= 0.45 && no severe rejectReason`.
+4. **Fallback to heuristic** only if vision throws (auth failure, network error, parse error). A successful "0 products" response is trusted as-is (cover pages legitimately have no products).
+5. **`sourceDetector`** tag on each candidate: `VISION_JSON` (primary path), `HEURISTIC` (vision not configured), or `FALLBACK` (vision configured but failed for this page).
 
-**Severe rejects** (set `isSearchable = false` regardless of score): `too_small`, `mostly_white`, `green_bar`, `orange_bar`, `color_bar`, `header_footer`, `empty_cell`, `too_horizontal`, `too_vertical`, `insufficient_content`, `card_too_large`, `page_like_crop`. Non-severe (`text_like`, `no_central_object`, `low_quality`, `green_dominant`) are informational only and would still be searchable if the score reached the threshold.
+The heuristic detector (also in `detect-product-candidates.ts`) is the legacy card-grid splitter: row-then-column whitespace gaps → score each cell as a card. It's still the fallback when the vision detector is unavailable.
 
-**Sizing:** `MIN_CARD_PX_ORIG = 220` is checked in **original** PDF-page pixels, not in the downscaled analysis space (`ANALYSIS_WIDTH = 800`). Checking against analysis pixels was the prior `too_small` bug — legitimate cards on high-DPI pages got rejected because the downscale shrunk them under 180px.
+**Hard constraint:** a `ProductCandidate` with `isSearchable = false` must never have an embedding. The search query also enforces `isSearchable = true` server-side — never rely on UI filtering.
 
-**Quality threshold:** `qualityScore >= 0.60` (and no severe reject) → `isSearchable = true`. A typical clean card scores 0.70-0.95. Cards naturally have text + price, so text-density is only penalized past the extreme (>0.10 transitions/px/row).
+**PageAnalysis table:** the full raw vision response is persisted per page (`provider`, `model`, `rawJson`, `productsCount`, `error`) for auditing. The per-product slice is also stored on `ProductCandidate.rawVisionJson`.
 
-**Per-page caps:** `MAX_SEARCHABLE_PER_PAGE = 12`, `MAX_TOTAL_PER_PAGE = 18` — sized to allow 3×3 product grids with debug overhead. Lower caps caused good cards to be dropped on dense pages.
+**Severe rejects** (force `isSearchable = false` regardless of score): `too_small`, `too_large`, `mostly_white`, `green_bar`, `orange_bar`, `color_bar`, `horizontal_bar`, `vertical_column`, `header_footer`, `empty_cell`, `too_horizontal`, `too_vertical`, `insufficient_content`, `card_too_large`, `page_like_crop`, `invalid_box`, `duplicate`, `low_confidence`. Non-severe (`text_like`, `no_central_object`, `low_quality`) are informational.
 
-Hard constraint: a `ProductCandidate` with `isSearchable = false` must never have an embedding. The search query also enforces `isSearchable = true` server-side — do not rely on UI filtering.
+**Sizing (heuristic path):** `MIN_CARD_PX_ORIG = 220` is checked in **original** PDF-page pixels, not in the downscaled analysis space (`ANALYSIS_WIDTH = 800`). Vision-path sizes are checked in original page coordinates by the box validator.
+
+**Per-page caps (heuristic path):** `MAX_SEARCHABLE_PER_PAGE = 12`, `MAX_TOTAL_PER_PAGE = 18`. Vision-path candidates aren't artificially capped — the model decides how many products fit on a page.
 
 ### pgvector queries
 
@@ -100,7 +106,10 @@ return normalizeVector(clsToken);
 | File | Role |
 |---|---|
 | `src/features/catalog-processing/render-pages.ts` | Renders PDF pages via `pdftoppm` |
-| `src/features/catalog-processing/detect-product-candidates.ts` | Card-grid detector: row/col gap splitting → per-cell quality filters (green/orange bars, white-ratio, aspect-ratio, header/footer position, text-density). Returns `DetectedCandidate` with `isSearchable` + `qualityScore` + `rejectReason` |
+| `src/features/catalog-processing/detect-product-candidates.ts` | Detector orchestrator: tries vision JSON first, falls back to heuristic card-grid splitter. Returns `PageDetectionResult = { candidates, pageAnalysis }` |
+| `src/features/catalog-processing/vision-json-detector.ts` | Multimodal vision detector. Provider-agnostic (`anthropic` / `openai`), uses fetch directly. Throws `VisionDetectorUnavailableError` when env is missing |
+| `src/features/catalog-processing/product-json-schema.ts` | Zod schemas for the vision response + `parseVisionJsonResponse()` (strips markdown fences, scans for balanced `{...}` block, validates) |
+| `src/features/catalog-processing/vision-box-validator.ts` | Clamp boxes (handles normalized 0-1 coords), filter geometric outliers, `dedupeBoxesByIoU(0.65)` |
 | `src/features/catalog-processing/process-catalog.ts` | Main pipeline: save PDF to storage → render → detect → upload crops → conditionally embed |
 | `src/features/catalog-processing/function-groups.ts` | Static product function group labels (prepared for future classification) |
 | `src/features/visual-search/embeddings.ts` | DINOv2 model singleton + embedding helpers |
@@ -121,11 +130,13 @@ return normalizeVector(clsToken);
 - **CatalogPage** → many **ProductCandidate** (the rendered page each candidate came from)
 - **ProductCandidate** — searchable image crop. Key fields:
   - `cropUrl` — image used for search/results (and for embedding when `isSearchable`)
-  - `cardUrl` — optional larger surrounding card region (debug/reference)
+  - `cardUrl` — surrounding card region (defaults to `cropUrl` in the MVP / vision path)
   - `originalUrl` — page the crop came from
-  - `embedding vector(768)` — **NULL unless `isSearchable && qualityScore >= 0.50`**
+  - `embedding vector(768)` — **NULL unless `isSearchable && qualityScore >= 0.60`**
   - `isSearchable Boolean` (default `false`), `qualityScore Float?`, `rejectReason String?`
   - `confidence`, `cropX/Y/Width/Height`, `sourceType`, `detectedLabel`, `functionGroup`
+  - **Vision metadata:** `productName`, `productNamePt`, `category`, `model`, `originalText`, `descriptionPt`, `sourceDetector` (`VISION_JSON`/`HEURISTIC`/`FALLBACK`), `visionConfidence`, `rawVisionJson`
+- **PageAnalysis** — one row per page processed. Stores `provider`, `model`, `rawJson` (full vision response), `productsCount`, optional `error`. Used for auditing — not consulted at search time.
 - **ProductImage** — legacy, not used in search; kept to avoid data loss
 
 ### Environment variables
@@ -136,6 +147,11 @@ DIRECT_URL                  # Supabase direct connection (Prisma CLI migrations)
 SUPABASE_URL                # https://xxx.supabase.co
 SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY   # required for server-side storage uploads
+
+# Vision detector (optional — heuristic fallback runs when unset)
+VISION_DETECTOR_PROVIDER    # 'anthropic' | 'openai'
+VISION_DETECTOR_API_KEY     # provider API key
+VISION_DETECTOR_MODEL       # e.g. 'claude-sonnet-4-6' or 'gpt-4o'
 ```
 
 ### Pages

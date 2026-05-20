@@ -12,10 +12,18 @@ export type SearchResult = {
   functionGroup: string | null;
   confidence: number | null;
   qualityScore: number | null;
+  // Structured product metadata from the vision detector (nullable when
+  // the candidate came from the heuristic path).
+  productName: string | null;
+  productNamePt: string | null;
+  category: string | null;
+  model: string | null;
+  descriptionPt: string | null;
+  sourceDetector: string | null;
 };
 
 const DEDUP_THRESHOLD = 0.97;
-const MIN_QUALITY = 0.50;
+const MIN_QUALITY = 0.5;
 
 export async function searchSimilarImages(
   embedding: number[]
@@ -34,6 +42,12 @@ export async function searchSimilarImages(
       pc."functionGroup",
       pc.confidence,
       pc."qualityScore",
+      pc."productName",
+      pc."productNamePt",
+      pc."category",
+      pc."model",
+      pc."descriptionPt",
+      pc."sourceDetector",
       (1 - (pc.embedding <=> ${vectorStr}::vector))::float8 AS similarity,
       c."fileName" AS "catalogFileName",
       s.name AS "supplierName"

@@ -32,6 +32,7 @@ model Catalog {
   images     ProductImage[]
   pages      CatalogPage[]
   candidates ProductCandidate[]
+  analyses   PageAnalysis[]
 
   @@index([supplierId])
   @@index([status])
@@ -64,6 +65,7 @@ model CatalogPage {
 
   catalog    Catalog            @relation(fields: [catalogId], references: [id], onDelete: Cascade)
   candidates ProductCandidate[]
+  analyses   PageAnalysis[]
 
   @@index([catalogId])
   @@unique([catalogId, pageNumber])
@@ -93,6 +95,17 @@ model ProductCandidate {
   rejectReason String?
   cardUrl      String?
 
+  // Structured product metadata produced by the multimodal vision detector
+  productName      String?
+  productNamePt    String?
+  category         String?
+  model            String?
+  originalText     String?
+  descriptionPt    String?
+  sourceDetector   String?
+  visionConfidence Float?
+  rawVisionJson    Json?
+
   embedding Unsupported("vector(768)")?
   createdAt DateTime                   @default(now())
 
@@ -102,6 +115,26 @@ model ProductCandidate {
   @@index([catalogId])
   @@index([pageId])
   @@index([functionGroup])
+  @@index([sourceDetector])
+}
+
+model PageAnalysis {
+  id             String   @id @default(cuid())
+  catalogId      String
+  pageId         String
+  pageNumber     Int
+  provider       String?
+  model          String?
+  rawJson        Json
+  productsCount  Int
+  error          String?
+  createdAt      DateTime @default(now())
+
+  catalog Catalog     @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  page    CatalogPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([pageId])
 }
 
 enum CandidateSourceType {

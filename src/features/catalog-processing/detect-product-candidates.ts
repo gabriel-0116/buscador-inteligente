@@ -1,6 +1,17 @@
 import sharp from "sharp";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  detectProductsJsonWithVision,
+  isVisionDetectorConfigured,
+  VisionDetectorUnavailableError,
+} from "./vision-json-detector";
+import {
+  dedupeBoxesByIoU,
+  validateVisionBoxes,
+} from "./vision-box-validator";
+
+export type SourceDetector = "VISION_JSON" | "HEURISTIC" | "FALLBACK";
 
 export type DetectedCandidate = {
   imagePath: string;
@@ -13,39 +24,69 @@ export type DetectedCandidate = {
   qualityScore: number;
   isSearchable: boolean;
   rejectReason?: string;
+  // Structured metadata produced by the vision detector. All optional —
+  // heuristic-only candidates leave these undefined.
+  productName?: string;
+  productNamePt?: string;
+  category?: string;
+  functionGroup?: string;
+  model?: string;
+  originalText?: string;
+  descriptionPt?: string;
+  sourceDetector?: SourceDetector;
+  visionConfidence?: number;
+  rawVisionJson?: unknown;
+};
+
+export type PageAnalysisInfo = {
+  provider?: string;
+  model?: string;
+  rawJson?: unknown;
+  productsCount: number;
+  error?: string;
+  sourceDetector: SourceDetector;
+};
+
+export type PageDetectionResult = {
+  candidates: DetectedCandidate[];
+  pageAnalysis: PageAnalysisInfo;
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const ANALYSIS_WIDTH = 800;
-// Minimum card side in ORIGINAL pixels — checked in original coords, not analysis,
-// to avoid rejecting legitimate cards as "too_small" when the page is downscaled.
 const MIN_CARD_PX_ORIG = 220;
 const MIN_AREA_RATIO = 0.015;
-// MVP: catalog pages can carry up to ~9-12 product cards. Caps must allow that.
 const MAX_SEARCHABLE_PER_PAGE = 12;
 const MAX_TOTAL_PER_PAGE = 18;
 const QUALITY_THRESHOLD = 0.6;
-// A row/col is treated as whitespace when this fraction or less of its pixels are non-white.
 const GAP_DENSITY = 0.04;
 const MIN_GAP_SPAN = 8;
+// Minimum vision-model confidence to allow a candidate into the search index.
+const VISION_CONFIDENCE_FLOOR = 0.45;
 
 type Box = { x1: number; y1: number; x2: number; y2: number };
 
-// Reject reasons that fully disqualify a crop from search, regardless of score.
 const SEVERE_REJECTS = new Set([
   "too_small",
+  "too_large",
   "mostly_white",
   "green_bar",
   "orange_bar",
   "color_bar",
   "header_footer",
+  "horizontal_bar",
+  "vertical_column",
   "empty_cell",
   "too_horizontal",
   "too_vertical",
   "insufficient_content",
   "card_too_large",
   "page_like_crop",
+  "invalid_box",
+  "invalid_json",
+  "duplicate",
+  "low_confidence",
 ]);
 
 // ── Low-level pixel helpers ──────────────────────────────────────────────────
@@ -59,7 +100,6 @@ function isGreen(r: number, g: number, b: number) {
 }
 
 function isOrange(r: number, g: number, b: number) {
-  // Orange / red-orange: R high, G moderate-low, B low, R clearly above B.
   return r > 180 && g > 60 && g < r - 20 && b < 100 && r > b + 60;
 }
 
@@ -153,7 +193,6 @@ function colDensities(
   return result;
 }
 
-// How much content (non-white fraction) is in the central 50% of the box
 function centralMassRatio(
   data: Buffer,
   channels: number,
@@ -178,7 +217,6 @@ function centralMassRatio(
   return center.nonWhite / full.nonWhite;
 }
 
-// Dark-to-light transitions per pixel per row → high = text-heavy region.
 function estimateTextLikeDensity(
   data: Buffer,
   channels: number,
@@ -210,9 +248,6 @@ function isMostlyWhiteCrop(whiteRatio: number): boolean {
   return whiteRatio > 0.9;
 }
 
-// A "color bar" = wide-and-short shape dominated by a single brand color.
-// Crucially: a full card that merely contains a colored price strip is NOT a bar,
-// because its aspect ratio is closer to square.
 function isColorBarDominant(
   greenRatio: number,
   orangeRatio: number,
@@ -226,7 +261,6 @@ function isColorBarDominant(
 
 function isTooHorizontal(aspectRatio: number, heightOrig: number): boolean {
   if (aspectRatio > 3.2) return true;
-  // Moderately horizontal AND short = also suspect (likely a strip)
   if (aspectRatio > 2.5 && heightOrig < MIN_CARD_PX_ORIG * 1.2) return true;
   return false;
 }
@@ -239,7 +273,7 @@ function hasEnoughVisualMass(nonWhiteRatio: number): boolean {
   return nonWhiteRatio >= 0.05;
 }
 
-// ── Card quality scoring ────────────────────────────────────────────────────
+// ── Heuristic card quality (page-context aware) ─────────────────────────────
 
 function calculateCardQuality(args: {
   data: Buffer;
@@ -257,8 +291,6 @@ function calculateCardQuality(args: {
   const aspectRatio = bW / bH;
   const bArea = bW * bH;
 
-  // Size check is done in ORIGINAL coords — analysis is downscaled, so
-  // a 240×240 card might be ~96×96 in analysis space and would fail otherwise.
   const wOrig = bW / scale;
   const hOrig = bH / scale;
 
@@ -287,8 +319,6 @@ function calculateCardQuality(args: {
     return { score: 0, rejectReason: "insufficient_content" };
   }
 
-  // Header/footer: an entire box sitting in the top 10% or bottom 8% of the page
-  // is almost always metadata (logo, supplier name, page number).
   const topFrac = box.y1 / pageHeight;
   const botFrac = box.y2 / pageHeight;
   if (botFrac < 0.1 || topFrac > 0.92) {
@@ -297,22 +327,16 @@ function calculateCardQuality(args: {
 
   const areaRatio = bArea / pageArea;
   if (areaRatio > 0.75) {
-    // Full-page / near-full crop: keep for debug, not searchable.
     return { score: 0.25, rejectReason: "page_like_crop" };
   }
 
-  // Score components — a "good card" should score 0.70-0.95.
   const central = centralMassRatio(data, channels, width, box);
-
   const aspectScore =
     aspectRatio >= 0.6 && aspectRatio <= 1.6
       ? 1.0
       : Math.max(0, 1.0 - Math.abs(Math.log(aspectRatio)) * 0.5);
-
   const massScore = Math.min(1.0, stats.nonWhiteRatio * 5);
   const centralScore = Math.min(1.0, central * 2.5);
-
-  // Area: cards are typically 5-40% of the page.
   const areaScore =
     areaRatio < 0.02
       ? areaRatio * 30
@@ -320,13 +344,8 @@ function calculateCardQuality(args: {
         ? Math.max(0.3, 1.0 - (areaRatio - 0.55) * 2)
         : 1.0;
 
-  // Cards naturally contain text + price — only penalize *extreme* text density
-  // (a pure text/table block typically exceeds 0.10 transitions/px/row).
   const textDensity = estimateTextLikeDensity(data, channels, width, box);
   const textPenalty = Math.max(0, textDensity - 0.09) * 5;
-
-  // Soft penalty if a brand color leaks past 18% but didn't trigger the bar reject
-  // (so we still rank cleaner cards above ones with massive color strips).
   const colorLeakPenalty =
     Math.max(0, stats.greenRatio - 0.18) * 1.5 +
     Math.max(0, stats.orangeRatio - 0.18) * 1.5;
@@ -359,7 +378,77 @@ function shouldIndexCrop(score: number, rejectReason?: string): boolean {
   return score >= QUALITY_THRESHOLD;
 }
 
-// ── Gap detection and region splitting ──────────────────────────────────────
+// ── Standalone crop quality (no page-context — for already-validated boxes) ─
+
+async function evaluateCropImageQuality(
+  imagePath: string
+): Promise<{ score: number; rejectReason?: string }> {
+  const meta = await sharp(imagePath).metadata();
+  const origW = meta.width ?? 0;
+  const origH = meta.height ?? 0;
+  if (origW === 0 || origH === 0) return { score: 0, rejectReason: "invalid_box" };
+
+  const ANALYSIS_W = 600;
+  const scale = Math.min(1, ANALYSIS_W / origW);
+  const w = Math.max(1, Math.round(origW * scale));
+  const h = Math.max(1, Math.round(origH * scale));
+
+  const { data, info } = await sharp(imagePath)
+    .resize(w, h, { fit: "fill" })
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .toColorspace("srgb")
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const fullBox: Box = { x1: 0, y1: 0, x2: w - 1, y2: h - 1 };
+  const stats = pixelStats(data, info.channels, w, fullBox);
+
+  if (stats.whiteRatio > 0.92) return { score: 0, rejectReason: "mostly_white" };
+  if (stats.nonWhiteRatio < 0.04) return { score: 0, rejectReason: "insufficient_content" };
+
+  const aspectRatio = w / h;
+  const barCheck = isColorBarDominant(stats.greenRatio, stats.orangeRatio, aspectRatio);
+  if (barCheck.isBar) return { score: 0, rejectReason: barCheck.reason };
+
+  const central = centralMassRatio(data, info.channels, w, fullBox);
+  const textDensity = estimateTextLikeDensity(data, info.channels, w, fullBox);
+
+  const aspectScore =
+    aspectRatio >= 0.5 && aspectRatio <= 1.8
+      ? 1.0
+      : Math.max(0, 1.0 - Math.abs(Math.log(aspectRatio)) * 0.5);
+  const massScore = Math.min(1.0, stats.nonWhiteRatio * 5);
+  const centralScore = Math.min(1.0, central * 2.5);
+  const textPenalty = Math.max(0, textDensity - 0.1) * 5;
+  const colorLeakPenalty =
+    Math.max(0, stats.greenRatio - 0.22) * 1.2 +
+    Math.max(0, stats.orangeRatio - 0.22) * 1.2;
+
+  const score = Math.max(
+    0,
+    Math.min(
+      0.95,
+      massScore * 0.35 +
+        centralScore * 0.25 +
+        aspectScore * 0.2 +
+        // Base bonus: this box already passed envelope/dedup checks, so it
+        // starts with credit for being a legitimate card.
+        0.2 -
+        textPenalty * 0.15 -
+        colorLeakPenalty * 0.15
+    )
+  );
+
+  if (score < QUALITY_THRESHOLD) {
+    if (textDensity > 0.1) return { score, rejectReason: "text_like" };
+    if (central < 0.06) return { score, rejectReason: "no_central_object" };
+    return { score, rejectReason: "low_quality" };
+  }
+
+  return { score };
+}
+
+// ── Gap detection / region splitting ────────────────────────────────────────
 
 function findGaps(densities: number[], threshold: number, minSpan: number): number[][] {
   const gaps: number[][] = [];
@@ -422,12 +511,6 @@ function getBoundingBox(
   return found ? { x1, y1, x2, y2 } : null;
 }
 
-// ── Card grid detection ─────────────────────────────────────────────────────
-//
-// Splits a page into a grid of candidate card cells using whitespace gaps.
-// Catalogs typically lay products out as 1-4 columns × 1-4 rows; row-then-column
-// gap splitting recovers this structure without forcing a fixed grid.
-
 function detectCardGridFromPage(args: {
   data: Buffer;
   channels: number;
@@ -435,7 +518,6 @@ function detectCardGridFromPage(args: {
   globalBox: Box;
 }): Box[] {
   const { data, channels, width, globalBox } = args;
-
   const rDens = rowDensities(data, channels, width, globalBox);
   const rowGaps = findGaps(rDens, GAP_DENSITY, MIN_GAP_SPAN);
   const rowRegions =
@@ -452,9 +534,13 @@ function detectCardGridFromPage(args: {
   return cells;
 }
 
-// ── Main export ─────────────────────────────────────────────────────────────
+// ── Heuristic detector ──────────────────────────────────────────────────────
+//
+// Used as a fallback when the vision detector is not configured or fails.
+// Splits the page into a grid of cells via whitespace gaps and scores each
+// cell with `calculateCardQuality`.
 
-export async function detectProductCandidatesFromPage(args: {
+async function runHeuristicDetector(args: {
   pageImagePath: string;
   outputDir: string;
   pageNumber: number;
@@ -469,7 +555,6 @@ export async function detectProductCandidatesFromPage(args: {
   const scale = Math.min(1, ANALYSIS_WIDTH / origWidth);
   const anaWidth = Math.round(origWidth * scale);
   const anaHeight = Math.round(origHeight * scale);
-  // Equivalent minimum in analysis space; floored to avoid 0 for tiny pages.
   const minCardPxAna = Math.max(40, Math.round(MIN_CARD_PX_ORIG * scale));
 
   const { data, info } = await sharp(pageImagePath)
@@ -492,7 +577,6 @@ export async function detectProductCandidatesFromPage(args: {
     globalBox,
   });
 
-  // Drop cells smaller than the minimum card size at analysis resolution.
   const candidateBoxes = cells.filter((b) => {
     const w = b.x2 - b.x1 + 1;
     const h = b.y2 - b.y1 + 1;
@@ -503,7 +587,6 @@ export async function detectProductCandidatesFromPage(args: {
     );
   });
 
-  // Fallback: if grid splitting found nothing usable, evaluate the whole content box.
   if (candidateBoxes.length === 0) {
     const w = globalBox.x2 - globalBox.x1 + 1;
     const h = globalBox.y2 - globalBox.y1 + 1;
@@ -517,7 +600,6 @@ export async function detectProductCandidatesFromPage(args: {
     quality: { score: number; rejectReason?: string };
     confidence: number;
   };
-
   const scored: Scored[] = candidateBoxes.map((box) => ({
     box,
     quality: calculateCardQuality({
@@ -532,7 +614,6 @@ export async function detectProductCandidatesFromPage(args: {
     confidence: 0.75,
   }));
 
-  // Searchable first, then by score desc.
   scored.sort((a, b) => {
     const aS = shouldIndexCrop(a.quality.score, a.quality.rejectReason) ? 1 : 0;
     const bS = shouldIndexCrop(b.quality.score, b.quality.rejectReason) ? 1 : 0;
@@ -563,7 +644,6 @@ export async function detectProductCandidatesFromPage(args: {
     const sw = Math.max(1, Math.min(origWidth - sx, toOrig(box.x2 - box.x1 + 1)));
     const sh = Math.max(1, Math.min(origHeight - sy, toOrig(box.y2 - box.y1 + 1)));
 
-    // Final safety check at original resolution.
     if (sw < MIN_CARD_PX_ORIG || sh < MIN_CARD_PX_ORIG) continue;
 
     const prefix = `page-${String(pageNumber).padStart(3, "0")}-crop-${String(cropIndex).padStart(2, "0")}`;
@@ -576,11 +656,8 @@ export async function detectProductCandidatesFromPage(args: {
       .toFile(imagePath);
 
     const isSearchable = shouldIndexCrop(quality.score, quality.rejectReason);
-
     results.push({
       imagePath,
-      // MVP: 1 card = 1 candidate. The crop is the card itself; process-catalog
-      // copies cropUrl into cardUrl when no separate card image is provided.
       x: sx,
       y: sy,
       width: sw,
@@ -590,9 +667,188 @@ export async function detectProductCandidatesFromPage(args: {
       isSearchable,
       rejectReason: quality.rejectReason,
     });
-
     cropIndex++;
   }
 
   return results;
+}
+
+// ── Vision-detector pipeline ────────────────────────────────────────────────
+
+async function runVisionDetector(args: {
+  pageImagePath: string;
+  outputDir: string;
+  pageNumber: number;
+}): Promise<{ candidates: DetectedCandidate[]; pageAnalysis: PageAnalysisInfo }> {
+  await mkdir(args.outputDir, { recursive: true });
+
+  const meta = await sharp(args.pageImagePath).metadata();
+  const pageWidth = meta.width ?? 0;
+  const pageHeight = meta.height ?? 0;
+
+  const vision = await detectProductsJsonWithVision({
+    pageImagePath: args.pageImagePath,
+    pageNumber: args.pageNumber,
+    pageWidth,
+    pageHeight,
+  });
+
+  const validated = validateVisionBoxes({
+    products: vision.products,
+    pageWidth,
+    pageHeight,
+  });
+  const deduped = dedupeBoxesByIoU(validated, 0.65);
+
+  const candidates: DetectedCandidate[] = [];
+  let cropIndex = 1;
+
+  for (const product of deduped) {
+    const { box } = product;
+    let { rejectReason } = product;
+
+    const sx = Math.max(0, Math.min(pageWidth - 1, Math.round(box.x)));
+    const sy = Math.max(0, Math.min(pageHeight - 1, Math.round(box.y)));
+    const sw = Math.max(
+      1,
+      Math.min(pageWidth - sx, Math.round(box.width))
+    );
+    const sh = Math.max(
+      1,
+      Math.min(pageHeight - sy, Math.round(box.height))
+    );
+
+    const prefix = `page-${String(args.pageNumber).padStart(3, "0")}-crop-${String(cropIndex).padStart(2, "0")}`;
+    const imagePath = join(args.outputDir, `${prefix}.jpg`);
+
+    try {
+      await sharp(args.pageImagePath)
+        .extract({ left: sx, top: sy, width: sw, height: sh })
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .jpeg({ quality: 90 })
+        .toFile(imagePath);
+    } catch (err) {
+      console.error(
+        `[vision] page ${args.pageNumber} crop ${cropIndex} extract failed:`,
+        err
+      );
+      continue;
+    }
+
+    let qualityScore = 0;
+    if (!rejectReason) {
+      const local = await evaluateCropImageQuality(imagePath);
+      qualityScore = local.score;
+      if (local.rejectReason) rejectReason = local.rejectReason;
+    }
+
+    const visionConf = product.confidence;
+    let isSearchable =
+      !rejectReason &&
+      qualityScore >= QUALITY_THRESHOLD &&
+      visionConf >= VISION_CONFIDENCE_FLOOR;
+
+    if (!rejectReason && visionConf < VISION_CONFIDENCE_FLOOR) {
+      rejectReason = "low_confidence";
+      isSearchable = false;
+    }
+
+    candidates.push({
+      imagePath,
+      x: sx,
+      y: sy,
+      width: sw,
+      height: sh,
+      confidence: visionConf,
+      qualityScore,
+      isSearchable,
+      rejectReason,
+      productName: product.productName ?? undefined,
+      productNamePt: product.productNamePt ?? undefined,
+      category: product.category ?? undefined,
+      functionGroup: product.functionGroup ?? undefined,
+      model: product.model ?? undefined,
+      originalText: product.originalText ?? undefined,
+      descriptionPt: product.descriptionPt ?? undefined,
+      sourceDetector: "VISION_JSON",
+      visionConfidence: visionConf,
+      rawVisionJson: product,
+    });
+
+    cropIndex++;
+  }
+
+  return {
+    candidates,
+    pageAnalysis: {
+      provider: vision.provider,
+      model: vision.model,
+      rawJson: vision.rawJson,
+      productsCount: vision.products.length,
+      sourceDetector: "VISION_JSON",
+    },
+  };
+}
+
+// ── Orchestrator (public API) ───────────────────────────────────────────────
+
+export async function detectProductCandidatesFromPage(args: {
+  pageImagePath: string;
+  outputDir: string;
+  pageNumber: number;
+}): Promise<PageDetectionResult> {
+  // Try the vision detector first when configured.
+  if (isVisionDetectorConfigured()) {
+    try {
+      const result = await runVisionDetector(args);
+      const searchable = result.candidates.filter((c) => c.isSearchable).length;
+      console.log(
+        `[detector] page ${args.pageNumber}: VISION → raw=${result.pageAnalysis.productsCount} valid=${result.candidates.length} searchable=${searchable}`
+      );
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!(err instanceof VisionDetectorUnavailableError)) {
+        console.error(
+          `[detector] page ${args.pageNumber}: vision failed (${msg}) → heuristic fallback`
+        );
+      }
+      const heuristic = await runHeuristicDetector(args);
+      const searchable = heuristic.filter((c) => c.isSearchable).length;
+      console.log(
+        `[detector] page ${args.pageNumber}: FALLBACK → ${heuristic.length} candidates, ${searchable} searchable`
+      );
+      return {
+        candidates: heuristic.map((c) => ({
+          ...c,
+          sourceDetector: "FALLBACK" as const,
+        })),
+        pageAnalysis: {
+          productsCount: heuristic.length,
+          error: msg,
+          sourceDetector: "FALLBACK",
+        },
+      };
+    }
+  }
+
+  // No vision config → use heuristic as the primary detector.
+  console.log(
+    `[detector] page ${args.pageNumber}: HEURISTIC (vision detector not configured)`
+  );
+  const heuristic = await runHeuristicDetector(args);
+  const searchable = heuristic.filter((c) => c.isSearchable).length;
+  console.log(
+    `[detector] page ${args.pageNumber}: HEURISTIC → ${heuristic.length} candidates, ${searchable} searchable`
+  );
+  return {
+    candidates: heuristic.map((c) => ({
+      ...c,
+      sourceDetector: "HEURISTIC" as const,
+    })),
+    pageAnalysis: {
+      productsCount: heuristic.length,
+      sourceDetector: "HEURISTIC",
+    },
+  };
 }

@@ -23,6 +23,7 @@ const statusVariant: Record<string, "default" | "secondary" | "destructive"> = {
 
 const rejectLabel: Record<string, string> = {
   too_small: "muito pequeno",
+  too_large: "muito grande",
   too_horizontal: "muito horizontal",
   too_vertical: "muito vertical",
   mostly_white: "quase branco",
@@ -30,6 +31,8 @@ const rejectLabel: Record<string, string> = {
   green_dominant: "verde dominante",
   orange_bar: "faixa laranja",
   color_bar: "faixa colorida",
+  horizontal_bar: "barra horizontal",
+  vertical_column: "coluna vertical",
   header_footer: "cabeçalho/rodapé",
   empty_cell: "célula vazia",
   insufficient_content: "sem conteúdo",
@@ -38,6 +41,18 @@ const rejectLabel: Record<string, string> = {
   text_like: "texto/tabela",
   no_central_object: "sem objeto central",
   low_quality: "baixa qualidade",
+  invalid_box: "box inválido",
+  invalid_json: "JSON inválido",
+  duplicate: "duplicado",
+  low_confidence: "confiança baixa",
+  no_products_detected: "sem produtos detectados",
+  fallback_used: "fallback heurístico",
+};
+
+const detectorLabel: Record<string, string> = {
+  VISION_JSON: "vision JSON",
+  HEURISTIC: "heurístico",
+  FALLBACK: "fallback heurístico",
 };
 
 export default async function CatalogPage({ params }: Props) {
@@ -70,6 +85,14 @@ export default async function CatalogPage({ params }: Props) {
           isSearchable: true,
           rejectReason: true,
           detectedLabel: true,
+          productName: true,
+          productNamePt: true,
+          category: true,
+          functionGroup: true,
+          model: true,
+          descriptionPt: true,
+          sourceDetector: true,
+          visionConfidence: true,
         },
         orderBy: [{ isSearchable: "desc" }, { qualityScore: "desc" }],
       },
@@ -191,78 +214,121 @@ export default async function CatalogPage({ params }: Props) {
             const searchable = catalog.candidates.filter((c) => c.isSearchable);
             const rejected = catalog.candidates.filter((c) => !c.isSearchable);
 
-            const renderCard = (c: (typeof catalog.candidates)[number]) => (
-              <div
-                key={c.id}
-                className={`overflow-hidden rounded-lg border bg-card ${
-                  c.isSearchable ? "border-green-500/40" : "opacity-70"
-                }`}
-              >
-                <a href={c.cropUrl} target="_blank" rel="noopener noreferrer" className="block">
-                  <div className="relative aspect-square bg-muted">
-                    <Image
-                      src={c.cropUrl}
-                      alt="Candidato"
-                      fill
-                      className="object-contain p-1"
-                      sizes="(max-width: 640px) 50vw, 20vw"
-                    />
-                  </div>
-                </a>
-                <div className="border-t p-2 flex flex-col gap-1 text-xs">
-                  <div className="flex flex-wrap gap-1">
-                    {c.isSearchable ? (
-                      <span className="rounded bg-green-100 px-1.5 py-0.5 text-green-700 font-medium">
-                        Busca: SIM
-                      </span>
-                    ) : (
-                      <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground font-medium">
-                        Debug
-                      </span>
+            const renderCard = (c: (typeof catalog.candidates)[number]) => {
+              const displayName = c.productNamePt ?? c.productName ?? c.detectedLabel;
+              return (
+                <div
+                  key={c.id}
+                  className={`overflow-hidden rounded-lg border bg-card ${
+                    c.isSearchable ? "border-green-500/40" : "opacity-70"
+                  }`}
+                >
+                  <a href={c.cropUrl} target="_blank" rel="noopener noreferrer" className="block">
+                    <div className="relative aspect-square bg-muted">
+                      <Image
+                        src={c.cropUrl}
+                        alt={displayName ?? "Candidato"}
+                        fill
+                        className="object-contain p-1"
+                        sizes="(max-width: 640px) 50vw, 20vw"
+                      />
+                    </div>
+                  </a>
+                  <div className="border-t p-2 flex flex-col gap-1 text-xs">
+                    <div className="flex flex-wrap gap-1">
+                      {c.isSearchable ? (
+                        <span className="rounded bg-green-100 px-1.5 py-0.5 text-green-700 font-medium">
+                          Busca: SIM
+                        </span>
+                      ) : (
+                        <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground font-medium">
+                          Debug
+                        </span>
+                      )}
+                      {c.sourceDetector && (
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-medium ${
+                            c.sourceDetector === "VISION_JSON"
+                              ? "bg-blue-100 text-blue-700"
+                              : "bg-amber-100 text-amber-700"
+                          }`}
+                          title={c.sourceDetector}
+                        >
+                          {detectorLabel[c.sourceDetector] ?? c.sourceDetector}
+                        </span>
+                      )}
+                      {c.rejectReason && (
+                        <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
+                          {rejectLabel[c.rejectReason] ?? c.rejectReason}
+                        </span>
+                      )}
+                    </div>
+
+                    {displayName && (
+                      <p className="font-medium leading-tight" title={displayName}>
+                        {displayName}
+                      </p>
                     )}
-                    {c.rejectReason && (
-                      <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
-                        {rejectLabel[c.rejectReason] ?? c.rejectReason}
-                      </span>
+                    {(c.category || c.functionGroup) && (
+                      <p className="text-muted-foreground truncate">
+                        {[c.category, c.functionGroup].filter(Boolean).join(" · ")}
+                      </p>
                     )}
-                  </div>
-                  <div className="flex gap-2 text-muted-foreground">
-                    {c.qualityScore != null && (
-                      <span>qual. {Math.round(c.qualityScore * 100)}%</span>
+                    {c.model && (
+                      <p className="text-muted-foreground truncate">Modelo: {c.model}</p>
                     )}
-                    {c.confidence != null && (
-                      <span>conf. {Math.round(c.confidence * 100)}%</span>
+                    {c.descriptionPt && (
+                      <p
+                        className="line-clamp-2 text-muted-foreground"
+                        title={c.descriptionPt}
+                      >
+                        {c.descriptionPt}
+                      </p>
                     )}
-                  </div>
-                  <p className="text-muted-foreground">
-                    {c.width}×{c.height}px
-                  </p>
-                  <p className="text-muted-foreground capitalize">
-                    {c.sourceType.toLowerCase().replace("_", " ")}
-                  </p>
-                  <div className="flex flex-col gap-0.5 mt-0.5">
-                    <a
-                      href={c.originalUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline-offset-2 hover:underline text-muted-foreground"
-                    >
-                      Página original
-                    </a>
-                    {c.cardUrl && c.cardUrl !== c.cropUrl && (
+
+                    <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-muted-foreground">
+                      {c.qualityScore != null && (
+                        <span>qual. {Math.round(c.qualityScore * 100)}%</span>
+                      )}
+                      {c.visionConfidence != null && (
+                        <span>vision {Math.round(c.visionConfidence * 100)}%</span>
+                      )}
+                      {c.confidence != null && c.visionConfidence == null && (
+                        <span>conf. {Math.round(c.confidence * 100)}%</span>
+                      )}
+                    </div>
+
+                    <p className="text-muted-foreground">
+                      {c.width}×{c.height}px
+                    </p>
+                    <p className="text-muted-foreground capitalize">
+                      {c.sourceType.toLowerCase().replace("_", " ")}
+                    </p>
+
+                    <div className="flex flex-col gap-0.5 mt-0.5">
                       <a
-                        href={c.cardUrl}
+                        href={c.originalUrl}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="underline-offset-2 hover:underline text-muted-foreground"
                       >
-                        Card completo
+                        Página original
                       </a>
-                    )}
+                      {c.cardUrl && c.cardUrl !== c.cropUrl && (
+                        <a
+                          href={c.cardUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline-offset-2 hover:underline text-muted-foreground"
+                        >
+                          Card completo
+                        </a>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
-            );
+              );
+            };
 
             if (catalog.candidates.length === 0) {
               return (
