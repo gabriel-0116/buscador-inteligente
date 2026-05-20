@@ -83,7 +83,9 @@ export async function processCatalog(
             const cropStoragePath = `${catalogId}/candidates/candidate-${String(candidateIndex).padStart(4, "0")}.jpg`;
             const cropUrl = await uploadImageToStorage(cropStoragePath, cropBuffer);
 
-            // Upload card image if it exists
+            // Upload card image if the detector provided a separate one.
+            // MVP: detector emits one card-shaped crop per product and leaves
+            // cardImagePath undefined → cardUrl falls back to cropUrl.
             let cardUrl: string | undefined;
             if (candidate.cardImagePath) {
               try {
@@ -101,7 +103,7 @@ export async function processCatalog(
                 pageId: catalogPage.id,
                 originalUrl: pageUrl,
                 cropUrl,
-                cardUrl,
+                cardUrl: cardUrl ?? cropUrl,
                 width: cropMeta.width ?? candidate.width,
                 height: cropMeta.height ?? candidate.height,
                 fileSize: cropStat.size,

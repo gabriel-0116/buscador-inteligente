@@ -51,7 +51,15 @@ product-images/
 
 The detector (`detect-product-candidates.ts`) is the *only* gate that decides whether a crop is searchable. The pipeline trusts its `isSearchable` + `qualityScore` flags — `process-catalog.ts` does not re-evaluate them, it only skips embedding generation when they fail.
 
-Rejection reasons (`rejectReason`) currently emitted by the detector include `green_bar`, `mostly_white`, `too_horizontal`, `too_vertical`, `text_like`, `card_too_large`/`page_like_crop`, and `low_visual_mass`. Per-page caps: max 3 searchable, max 6 total (best by `qualityScore` win).
+**Detection strategy (MVP):** "1 catalog card = 1 ProductCandidate." The detector splits each page into a grid of cells via whitespace gaps (row-then-column), evaluates each cell as a *card*, and uses the whole card as the searchable crop. There is no inner-object cropping — when a card passes filters, `cropUrl` *is* the card. `process-catalog.ts` mirrors `cropUrl` into `cardUrl` for parity in the schema.
+
+**Severe rejects** (set `isSearchable = false` regardless of score): `too_small`, `mostly_white`, `green_bar`, `orange_bar`, `color_bar`, `header_footer`, `empty_cell`, `too_horizontal`, `too_vertical`, `insufficient_content`, `card_too_large`, `page_like_crop`. Non-severe (`text_like`, `no_central_object`, `low_quality`, `green_dominant`) are informational only and would still be searchable if the score reached the threshold.
+
+**Sizing:** `MIN_CARD_PX_ORIG = 220` is checked in **original** PDF-page pixels, not in the downscaled analysis space (`ANALYSIS_WIDTH = 800`). Checking against analysis pixels was the prior `too_small` bug — legitimate cards on high-DPI pages got rejected because the downscale shrunk them under 180px.
+
+**Quality threshold:** `qualityScore >= 0.60` (and no severe reject) → `isSearchable = true`. A typical clean card scores 0.70-0.95. Cards naturally have text + price, so text-density is only penalized past the extreme (>0.10 transitions/px/row).
+
+**Per-page caps:** `MAX_SEARCHABLE_PER_PAGE = 12`, `MAX_TOTAL_PER_PAGE = 18` — sized to allow 3×3 product grids with debug overhead. Lower caps caused good cards to be dropped on dense pages.
 
 Hard constraint: a `ProductCandidate` with `isSearchable = false` must never have an embedding. The search query also enforces `isSearchable = true` server-side — do not rely on UI filtering.
 
@@ -92,7 +100,7 @@ return normalizeVector(clsToken);
 | File | Role |
 |---|---|
 | `src/features/catalog-processing/render-pages.ts` | Renders PDF pages via `pdftoppm` |
-| `src/features/catalog-processing/detect-product-candidates.ts` | Detector + quality filters (green-bar, white-ratio, aspect-ratio, text-density, card-vs-search-crop). Returns `DetectedCandidate` with `isSearchable` + `qualityScore` + `rejectReason` |
+| `src/features/catalog-processing/detect-product-candidates.ts` | Card-grid detector: row/col gap splitting → per-cell quality filters (green/orange bars, white-ratio, aspect-ratio, header/footer position, text-density). Returns `DetectedCandidate` with `isSearchable` + `qualityScore` + `rejectReason` |
 | `src/features/catalog-processing/process-catalog.ts` | Main pipeline: save PDF to storage → render → detect → upload crops → conditionally embed |
 | `src/features/catalog-processing/function-groups.ts` | Static product function group labels (prepared for future classification) |
 | `src/features/visual-search/embeddings.ts` | DINOv2 model singleton + embedding helpers |

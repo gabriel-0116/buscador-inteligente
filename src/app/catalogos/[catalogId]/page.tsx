@@ -28,8 +28,13 @@ const rejectLabel: Record<string, string> = {
   mostly_white: "quase branco",
   green_bar: "faixa verde",
   green_dominant: "verde dominante",
+  orange_bar: "faixa laranja",
+  color_bar: "faixa colorida",
+  header_footer: "cabeçalho/rodapé",
+  empty_cell: "célula vazia",
   insufficient_content: "sem conteúdo",
   card_too_large: "card inteiro",
+  page_like_crop: "página inteira",
   text_like: "texto/tabela",
   no_central_object: "sem objeto central",
   low_quality: "baixa qualidade",
@@ -182,98 +187,125 @@ export default async function CatalogPage({ params }: Props) {
           )}
 
           {/* Candidates */}
-          <section className="flex flex-col gap-3">
-            <h2 className="text-xl font-semibold">
-              Candidatos extraídos ({catalog.candidates.length})
-            </h2>
-            {catalog.candidates.length === 0 ? (
-              <p className="py-8 text-center text-muted-foreground">
-                Nenhum candidato detectado. Tente reprocessar.
-              </p>
-            ) : (
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                {catalog.candidates.map((c) => (
-                  <div
-                    key={c.id}
-                    className={`overflow-hidden rounded-lg border bg-card ${
-                      c.isSearchable ? "border-green-500/40" : "opacity-70"
-                    }`}
-                  >
-                    <a href={c.cropUrl} target="_blank" rel="noopener noreferrer" className="block">
-                      <div className="relative aspect-square bg-muted">
-                        <Image
-                          src={c.cropUrl}
-                          alt="Candidato"
-                          fill
-                          className="object-contain p-1"
-                          sizes="(max-width: 640px) 50vw, 20vw"
-                        />
-                      </div>
-                    </a>
-                    <div className="border-t p-2 flex flex-col gap-1 text-xs">
-                      {/* Searchable badge */}
-                      <div className="flex flex-wrap gap-1">
-                        {c.isSearchable ? (
-                          <span className="rounded bg-green-100 px-1.5 py-0.5 text-green-700 font-medium">
-                            Busca: SIM
-                          </span>
-                        ) : (
-                          <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground font-medium">
-                            Debug
-                          </span>
-                        )}
-                        {c.rejectReason && (
-                          <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
-                            {rejectLabel[c.rejectReason] ?? c.rejectReason}
-                          </span>
-                        )}
-                      </div>
+          {(() => {
+            const searchable = catalog.candidates.filter((c) => c.isSearchable);
+            const rejected = catalog.candidates.filter((c) => !c.isSearchable);
 
-                      {/* Scores */}
-                      <div className="flex gap-2 text-muted-foreground">
-                        {c.qualityScore != null && (
-                          <span>qual. {Math.round(c.qualityScore * 100)}%</span>
-                        )}
-                        {c.confidence != null && (
-                          <span>conf. {Math.round(c.confidence * 100)}%</span>
-                        )}
-                      </div>
-
-                      {/* Dimensions */}
-                      <p className="text-muted-foreground">{c.width}×{c.height}px</p>
-
-                      {/* Source type */}
-                      <p className="text-muted-foreground capitalize">
-                        {c.sourceType.toLowerCase().replace("_", " ")}
-                      </p>
-
-                      {/* Links */}
-                      <div className="flex flex-col gap-0.5 mt-0.5">
-                        <a
-                          href={c.originalUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="underline-offset-2 hover:underline text-muted-foreground"
-                        >
-                          Página original
-                        </a>
-                        {c.cardUrl && (
-                          <a
-                            href={c.cardUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="underline-offset-2 hover:underline text-muted-foreground"
-                          >
-                            Card completo
-                          </a>
-                        )}
-                      </div>
-                    </div>
+            const renderCard = (c: (typeof catalog.candidates)[number]) => (
+              <div
+                key={c.id}
+                className={`overflow-hidden rounded-lg border bg-card ${
+                  c.isSearchable ? "border-green-500/40" : "opacity-70"
+                }`}
+              >
+                <a href={c.cropUrl} target="_blank" rel="noopener noreferrer" className="block">
+                  <div className="relative aspect-square bg-muted">
+                    <Image
+                      src={c.cropUrl}
+                      alt="Candidato"
+                      fill
+                      className="object-contain p-1"
+                      sizes="(max-width: 640px) 50vw, 20vw"
+                    />
                   </div>
-                ))}
+                </a>
+                <div className="border-t p-2 flex flex-col gap-1 text-xs">
+                  <div className="flex flex-wrap gap-1">
+                    {c.isSearchable ? (
+                      <span className="rounded bg-green-100 px-1.5 py-0.5 text-green-700 font-medium">
+                        Busca: SIM
+                      </span>
+                    ) : (
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground font-medium">
+                        Debug
+                      </span>
+                    )}
+                    {c.rejectReason && (
+                      <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
+                        {rejectLabel[c.rejectReason] ?? c.rejectReason}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2 text-muted-foreground">
+                    {c.qualityScore != null && (
+                      <span>qual. {Math.round(c.qualityScore * 100)}%</span>
+                    )}
+                    {c.confidence != null && (
+                      <span>conf. {Math.round(c.confidence * 100)}%</span>
+                    )}
+                  </div>
+                  <p className="text-muted-foreground">
+                    {c.width}×{c.height}px
+                  </p>
+                  <p className="text-muted-foreground capitalize">
+                    {c.sourceType.toLowerCase().replace("_", " ")}
+                  </p>
+                  <div className="flex flex-col gap-0.5 mt-0.5">
+                    <a
+                      href={c.originalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline-offset-2 hover:underline text-muted-foreground"
+                    >
+                      Página original
+                    </a>
+                    {c.cardUrl && c.cardUrl !== c.cropUrl && (
+                      <a
+                        href={c.cardUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline-offset-2 hover:underline text-muted-foreground"
+                      >
+                        Card completo
+                      </a>
+                    )}
+                  </div>
+                </div>
               </div>
-            )}
-          </section>
+            );
+
+            if (catalog.candidates.length === 0) {
+              return (
+                <section className="flex flex-col gap-3">
+                  <h2 className="text-xl font-semibold">Candidatos extraídos (0)</h2>
+                  <p className="py-8 text-center text-muted-foreground">
+                    Nenhum candidato detectado. Tente reprocessar.
+                  </p>
+                </section>
+              );
+            }
+
+            return (
+              <>
+                <section className="flex flex-col gap-3">
+                  <h2 className="text-xl font-semibold">
+                    Pesquisáveis ({searchable.length})
+                  </h2>
+                  {searchable.length === 0 ? (
+                    <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-800">
+                      Nenhum candidato passou nos filtros de qualidade. Veja os
+                      rejeitados abaixo para entender o motivo.
+                    </p>
+                  ) : (
+                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                      {searchable.map(renderCard)}
+                    </div>
+                  )}
+                </section>
+
+                {rejected.length > 0 && (
+                  <section className="flex flex-col gap-3">
+                    <h2 className="text-xl font-semibold">
+                      Rejeitados / Debug ({rejected.length})
+                    </h2>
+                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                      {rejected.map(renderCard)}
+                    </div>
+                  </section>
+                )}
+              </>
+            );
+          })()}
         </>
       )}
     </main>
