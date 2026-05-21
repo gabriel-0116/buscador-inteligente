@@ -47,17 +47,37 @@ product-images/
     embedded/     ← legacy pdfimages output (not used for search)
 ```
 
-### Detection pipeline (vision-first, heuristic fallback)
+### Detection pipeline (cascade — cost-aware)
 
-`detectProductCandidatesFromPage()` is the orchestrator. Per page:
+`detectProductCandidatesFromPage()` orchestrates a **cascade** designed to call expensive vision models as rarely as possible. Behavior depends on `VISION_DETECTOR_MODE`:
 
-1. **If `VISION_DETECTOR_*` env vars are set**: send the rendered page to the configured multimodal model and parse a strict JSON response listing products + bounding boxes + product metadata (name, category, functionGroup, model, description). See `vision-json-detector.ts` and the Zod schemas in `product-json-schema.ts`.
-2. **Validate boxes** (`vision-box-validator.ts`): clamp to page bounds (also detects normalized 0-1 coords), reject `too_small`/`too_large`/`header_footer`/`horizontal_bar`/`vertical_column`, then `dedupeBoxesByIoU(0.65)` — when two boxes overlap a lot, the higher-confidence one wins.
-3. **Crop + local quality**: for each surviving box, extract the crop at original resolution, then run `evaluateCropImageQuality()` (a page-context-free version of the card scorer) to compute `qualityScore`. `isSearchable = true` requires `qualityScore >= 0.60 && visionConfidence >= 0.45 && no severe rejectReason`.
-4. **Fallback to heuristic** only if vision throws (auth failure, network error, parse error). A successful "0 products" response is trusted as-is (cover pages legitimately have no products).
-5. **`sourceDetector`** tag on each candidate: `VISION_JSON` (primary path), `HEURISTIC` (vision not configured), or `FALLBACK` (vision configured but failed for this page).
+- **`off`** — never call vision; heuristic only.
+- **`always`** — always call the cheap vision model (legacy behavior).
+- **`auto`** (default) — run the heuristic first, only escalate to vision when its output looks bad.
 
-The heuristic detector (also in `detect-product-candidates.ts`) is the legacy card-grid splitter: row-then-column whitespace gaps → score each cell as a card. It's still the fallback when the vision detector is unavailable.
+In **auto** mode, per page:
+
+1. Run the local heuristic detector (whitespace-gap card splitter).
+2. Score the result with `evaluateHeuristicQuality()`. The heuristic is considered "good" when:
+   - `searchableCount >= estimateExpectedProductCount(candidates)` (rough grid-density estimate)
+   - no searchable crop has aspect ratio > 3.0 (horizontal giant) or < 0.33 (vertical giant)
+   - average `qualityScore` of searchable crops >= 0.80
+   - severe rejects don't outnumber searchable crops
+3. If good → ship the heuristic candidates, **no vision call**. `sourceDetector = HEURISTIC`.
+4. If bad → call vision with `VISION_DETECTOR_MODEL_CHEAP`. `sourceDetector = VISION_JSON_CHEAP`.
+5. If `VISION_USE_PREMIUM_FALLBACK=true` AND the cheap model returned 0 products on a page the heuristic thought was productful → retry with `VISION_DETECTOR_MODEL_PREMIUM`. `sourceDetector = VISION_JSON_PREMIUM`.
+6. If vision throws (auth / network / parse) → use whatever heuristic candidates we already have. `sourceDetector = FALLBACK`.
+
+**Per-catalog budget**: `CATALOG_MAX_VISION_PAGES` (default 20) caps the number of vision calls per catalog. When the budget hits 0, remaining bad-heuristic pages serve heuristic candidates anyway and log `BUDGET_EXCEEDED`. This is the hard guardrail against the "$5 per PDF" failure mode.
+
+**Vision response handling** (unchanged):
+- **Validate boxes** (`vision-box-validator.ts`): clamp to page bounds (handles normalized 0-1 coords), reject `too_small`/`too_large`/`header_footer`/`horizontal_bar`/`vertical_column`, then `dedupeBoxesByIoU(0.65)`.
+- **Local quality** per crop via `evaluateCropImageQuality()`. `isSearchable = true` requires `qualityScore >= 0.60 && visionConfidence >= 0.45 && no severe rejectReason`.
+- A successful "0 products" response is trusted (cover pages have no products) — unless premium fallback kicks in.
+
+Each page returns `stats: { decision, modelUsed, visionCallsMade, budgetRemainingBefore/After, heuristicQualityReason }`. `processCatalog` aggregates these into a per-catalog summary line (`heuristicPages`/`visionCheapPages`/`visionPremiumPages`/`fallbackPages`/`estimatedVisionCalls`).
+
+The heuristic detector (also in `detect-product-candidates.ts`) is the same legacy card-grid splitter: row-then-column whitespace gaps → score each cell as a card.
 
 **Hard constraint:** a `ProductCandidate` with `isSearchable = false` must never have an embedding. The search query also enforces `isSearchable = true` server-side — never rely on UI filtering.
 
@@ -135,24 +155,47 @@ return normalizeVector(clsToken);
   - `embedding vector(768)` — **NULL unless `isSearchable && qualityScore >= 0.60`**
   - `isSearchable Boolean` (default `false`), `qualityScore Float?`, `rejectReason String?`
   - `confidence`, `cropX/Y/Width/Height`, `sourceType`, `detectedLabel`, `functionGroup`
-  - **Vision metadata:** `productName`, `productNamePt`, `category`, `model`, `originalText`, `descriptionPt`, `sourceDetector` (`VISION_JSON`/`HEURISTIC`/`FALLBACK`), `visionConfidence`, `rawVisionJson`
+  - **Vision metadata:** `productName`, `productNamePt`, `category`, `model`, `originalText`, `descriptionPt`, `sourceDetector` (`HEURISTIC` / `VISION_JSON_CHEAP` / `VISION_JSON_PREMIUM` / `FALLBACK` — legacy `VISION_JSON` may still appear in old rows), `visionConfidence`, `rawVisionJson`
 - **PageAnalysis** — one row per page processed. Stores `provider`, `model`, `rawJson` (full vision response), `productsCount`, optional `error`. Used for auditing — not consulted at search time.
 - **ProductImage** — legacy, not used in search; kept to avoid data loss
 
 ### Environment variables
 
 ```
-DATABASE_URL                # Supabase pooled connection (Prisma runtime)
-DIRECT_URL                  # Supabase direct connection (Prisma CLI migrations)
-SUPABASE_URL                # https://xxx.supabase.co
+DATABASE_URL                  # Supabase pooled connection (Prisma runtime)
+DIRECT_URL                    # Supabase direct connection (Prisma CLI migrations)
+SUPABASE_URL                  # https://xxx.supabase.co
 SUPABASE_ANON_KEY
-SUPABASE_SERVICE_ROLE_KEY   # required for server-side storage uploads
+SUPABASE_SERVICE_ROLE_KEY     # required for server-side storage uploads
 
-# Vision detector (optional — heuristic fallback runs when unset)
-VISION_DETECTOR_PROVIDER    # 'anthropic' | 'openai'
-VISION_DETECTOR_API_KEY     # provider API key
-VISION_DETECTOR_MODEL       # e.g. 'claude-sonnet-4-6' or 'gpt-4o'
+# Vision detector (cascade pipeline — optional)
+VISION_DETECTOR_PROVIDER      # 'anthropic' | 'openai'
+VISION_DETECTOR_API_KEY       # provider API key
+VISION_DETECTOR_MODE          # 'auto' (default) | 'always' | 'off'
+VISION_DETECTOR_MODEL_CHEAP   # cheap model — primary vision model in cascade
+VISION_DETECTOR_MODEL_PREMIUM # premium model — only used when fallback is on
+VISION_USE_PREMIUM_FALLBACK   # 'true' | 'false' (default false)
+CATALOG_MAX_VISION_PAGES      # per-catalog vision-call cap (default 20)
+
+# Legacy single-model var — still honored as fallback for *_CHEAP if set
+VISION_DETECTOR_MODEL
 ```
+
+**Recommended config for cheap testing:**
+
+```
+VISION_DETECTOR_PROVIDER=openai
+VISION_DETECTOR_MODE=auto
+VISION_DETECTOR_MODEL_CHEAP=gpt-5.4-mini
+VISION_DETECTOR_MODEL_PREMIUM=gpt-5.5
+VISION_USE_PREMIUM_FALLBACK=false
+CATALOG_MAX_VISION_PAGES=20
+```
+
+Notes:
+- For cheap testing across many catalogs, use `auto` + cheap-only (premium fallback off).
+- To boost quality on a few troublesome pages, enable premium fallback. **Never** combine premium fallback with `MODE=always` over a full catalog — that's how you get a $5 PDF.
+- `CATALOG_MAX_VISION_PAGES=0` effectively disables vision; equivalent to `MODE=off` but logged differently (`BUDGET_EXCEEDED` vs `VISION_OFF`).
 
 ### Pages
 

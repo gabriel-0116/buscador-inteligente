@@ -27,6 +27,41 @@ export type VisionDetectorResult = {
   products: PageProduct[];
 };
 
+export type VisionMode = "always" | "auto" | "off";
+
+export function getVisionMode(): VisionMode {
+  const raw = process.env.VISION_DETECTOR_MODE?.toLowerCase();
+  if (raw === "always" || raw === "off" || raw === "auto") return raw;
+  return "auto";
+}
+
+export function getCheapVisionModel(): string | undefined {
+  return (
+    process.env.VISION_DETECTOR_MODEL_CHEAP || process.env.VISION_DETECTOR_MODEL
+  );
+}
+
+export function getPremiumVisionModel(): string | undefined {
+  return (
+    process.env.VISION_DETECTOR_MODEL_PREMIUM ||
+    process.env.VISION_DETECTOR_MODEL
+  );
+}
+
+export function isPremiumFallbackEnabled(): boolean {
+  return (process.env.VISION_USE_PREMIUM_FALLBACK || "")
+    .toLowerCase()
+    .trim() === "true";
+}
+
+export function getMaxVisionPagesPerCatalog(): number {
+  const raw = process.env.CATALOG_MAX_VISION_PAGES;
+  if (!raw) return 20;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) return 20;
+  return n;
+}
+
 // The prompt is intentionally strict about JSON-only output so we don't need
 // to chase markdown fences (though the parser handles them anyway).
 function buildPrompt(args: {
@@ -208,7 +243,9 @@ export function isVisionDetectorConfigured(): boolean {
   return Boolean(
     process.env.VISION_DETECTOR_PROVIDER &&
       process.env.VISION_DETECTOR_API_KEY &&
-      process.env.VISION_DETECTOR_MODEL
+      (process.env.VISION_DETECTOR_MODEL_CHEAP ||
+        process.env.VISION_DETECTOR_MODEL_PREMIUM ||
+        process.env.VISION_DETECTOR_MODEL)
   );
 }
 
@@ -217,14 +254,18 @@ export async function detectProductsJsonWithVision(args: {
   pageNumber: number;
   pageWidth: number;
   pageHeight: number;
+  modelOverride?: string;
 }): Promise<VisionDetectorResult> {
   const provider = process.env.VISION_DETECTOR_PROVIDER?.toLowerCase();
   const apiKey = process.env.VISION_DETECTOR_API_KEY;
-  const model = process.env.VISION_DETECTOR_MODEL;
+  const model =
+    args.modelOverride ||
+    process.env.VISION_DETECTOR_MODEL_CHEAP ||
+    process.env.VISION_DETECTOR_MODEL;
 
   if (!provider || !apiKey || !model) {
     throw new VisionDetectorUnavailableError(
-      "VISION_DETECTOR_PROVIDER, VISION_DETECTOR_API_KEY and VISION_DETECTOR_MODEL must all be set"
+      "VISION_DETECTOR_PROVIDER, VISION_DETECTOR_API_KEY and a model (VISION_DETECTOR_MODEL_CHEAP/PREMIUM or VISION_DETECTOR_MODEL) must all be set"
     );
   }
 

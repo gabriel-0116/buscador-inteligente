@@ -3,6 +3,10 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
   detectProductsJsonWithVision,
+  getCheapVisionModel,
+  getPremiumVisionModel,
+  getVisionMode,
+  isPremiumFallbackEnabled,
   isVisionDetectorConfigured,
   VisionDetectorUnavailableError,
 } from "./vision-json-detector";
@@ -11,7 +15,31 @@ import {
   validateVisionBoxes,
 } from "./vision-box-validator";
 
-export type SourceDetector = "VISION_JSON" | "HEURISTIC" | "FALLBACK";
+export type SourceDetector =
+  | "VISION_JSON"
+  | "VISION_JSON_CHEAP"
+  | "VISION_JSON_PREMIUM"
+  | "HEURISTIC"
+  | "FALLBACK";
+
+export type DetectionDecision =
+  | "HEURISTIC"
+  | "VISION_CHEAP"
+  | "VISION_PREMIUM"
+  | "FALLBACK"
+  | "BUDGET_EXCEEDED"
+  | "VISION_OFF";
+
+export type DetectionStats = {
+  decision: DetectionDecision;
+  modelUsed?: string;
+  visionCallsMade: number;
+  heuristicQualityReason?: string;
+  budgetRemainingBefore?: number;
+  budgetRemainingAfter?: number;
+};
+
+export type VisionBudget = { remaining: number };
 
 export type DetectedCandidate = {
   imagePath: string;
@@ -50,6 +78,7 @@ export type PageAnalysisInfo = {
 export type PageDetectionResult = {
   candidates: DetectedCandidate[];
   pageAnalysis: PageAnalysisInfo;
+  stats: DetectionStats;
 };
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -679,6 +708,8 @@ async function runVisionDetector(args: {
   pageImagePath: string;
   outputDir: string;
   pageNumber: number;
+  model: string;
+  sourceDetector: "VISION_JSON_CHEAP" | "VISION_JSON_PREMIUM";
 }): Promise<{ candidates: DetectedCandidate[]; pageAnalysis: PageAnalysisInfo }> {
   await mkdir(args.outputDir, { recursive: true });
 
@@ -691,6 +722,7 @@ async function runVisionDetector(args: {
     pageNumber: args.pageNumber,
     pageWidth,
     pageHeight,
+    modelOverride: args.model,
   });
 
   const validated = validateVisionBoxes({
@@ -770,7 +802,7 @@ async function runVisionDetector(args: {
       model: product.model ?? undefined,
       originalText: product.originalText ?? undefined,
       descriptionPt: product.descriptionPt ?? undefined,
-      sourceDetector: "VISION_JSON",
+      sourceDetector: args.sourceDetector,
       visionConfidence: visionConf,
       rawVisionJson: product,
     });
@@ -785,70 +817,338 @@ async function runVisionDetector(args: {
       model: vision.model,
       rawJson: vision.rawJson,
       productsCount: vision.products.length,
-      sourceDetector: "VISION_JSON",
+      sourceDetector: args.sourceDetector,
     },
   };
 }
 
+// ── Heuristic-quality gating ────────────────────────────────────────────────
+//
+// Decides if the heuristic result is "good enough" to skip the expensive
+// vision call. Cheap to compute — runs only on the candidates that were
+// already produced locally.
+
+function estimateExpectedProductCount(candidates: DetectedCandidate[]): number {
+  const totalBlocks = candidates.length;
+  if (totalBlocks === 0) return 0;
+  if (totalBlocks <= 2) return 1;
+  if (totalBlocks <= 4) return 3;
+  if (totalBlocks <= 6) return 5;
+  // A typical 3x3 catalog grid should yield at least 7 candidates.
+  return 7;
+}
+
+type HeuristicQuality = {
+  good: boolean;
+  reason?: string;
+  searchableCount: number;
+  averageQuality: number;
+  expectedMin: number;
+};
+
+function evaluateHeuristicQuality(
+  candidates: DetectedCandidate[]
+): HeuristicQuality {
+  const expectedMin = estimateExpectedProductCount(candidates);
+  const searchable = candidates.filter((c) => c.isSearchable);
+  const searchableCount = searchable.length;
+
+  if (searchableCount === 0) {
+    return {
+      good: false,
+      reason: "no_searchable",
+      searchableCount,
+      averageQuality: 0,
+      expectedMin,
+    };
+  }
+
+  if (searchableCount < expectedMin) {
+    return {
+      good: false,
+      reason: `below_expected(${searchableCount}/${expectedMin})`,
+      searchableCount,
+      averageQuality: 0,
+      expectedMin,
+    };
+  }
+
+  for (const c of searchable) {
+    const aspect = c.height > 0 ? c.width / c.height : 0;
+    if (aspect > 3.0) {
+      return {
+        good: false,
+        reason: "horizontal_giant",
+        searchableCount,
+        averageQuality: 0,
+        expectedMin,
+      };
+    }
+    if (aspect > 0 && aspect < 0.33) {
+      return {
+        good: false,
+        reason: "vertical_giant",
+        searchableCount,
+        averageQuality: 0,
+        expectedMin,
+      };
+    }
+  }
+
+  const avg =
+    searchable.reduce((sum, c) => sum + c.qualityScore, 0) / searchable.length;
+  if (avg < 0.8) {
+    return {
+      good: false,
+      reason: `avg_quality_low(${avg.toFixed(2)})`,
+      searchableCount,
+      averageQuality: avg,
+      expectedMin,
+    };
+  }
+
+  const severeRejects = candidates.filter(
+    (c) => c.rejectReason && SEVERE_REJECTS.has(c.rejectReason)
+  ).length;
+  if (severeRejects > searchableCount) {
+    return {
+      good: false,
+      reason: `too_many_severe_rejects(${severeRejects})`,
+      searchableCount,
+      averageQuality: avg,
+      expectedMin,
+    };
+  }
+
+  return { good: true, searchableCount, averageQuality: avg, expectedMin };
+}
+
 // ── Orchestrator (public API) ───────────────────────────────────────────────
+//
+// Cascade strategy (mode = "auto", the default):
+//   1. Run the cheap heuristic locally.
+//   2. If `evaluateHeuristicQuality` says it's good → ship those candidates,
+//      no vision call.
+//   3. Otherwise call the vision model with VISION_DETECTOR_MODEL_CHEAP.
+//   4. If the cheap model returns nothing on a page that looked productful
+//      AND VISION_USE_PREMIUM_FALLBACK=true, retry with the premium model.
+//   5. If vision throws, fall back to the heuristic result we already have.
+//
+// `visionBudget` is decremented for every vision call made. When the budget
+// hits zero, the orchestrator stops escalating and serves the heuristic
+// result (logging BUDGET_EXCEEDED) so a runaway catalog can't burn money.
+
+function makeHeuristicResult(
+  candidates: DetectedCandidate[],
+  args: {
+    decision: DetectionDecision;
+    sourceDetector: "HEURISTIC" | "FALLBACK";
+    heuristicQualityReason?: string;
+    visionCallsMade: number;
+    budgetRemainingBefore?: number;
+    budgetRemainingAfter?: number;
+    error?: string;
+  }
+): PageDetectionResult {
+  return {
+    candidates: candidates.map((c) => ({
+      ...c,
+      sourceDetector: args.sourceDetector,
+    })),
+    pageAnalysis: {
+      productsCount: candidates.length,
+      sourceDetector: args.sourceDetector,
+      error: args.error,
+    },
+    stats: {
+      decision: args.decision,
+      visionCallsMade: args.visionCallsMade,
+      heuristicQualityReason: args.heuristicQualityReason,
+      budgetRemainingBefore: args.budgetRemainingBefore,
+      budgetRemainingAfter: args.budgetRemainingAfter,
+    },
+  };
+}
 
 export async function detectProductCandidatesFromPage(args: {
   pageImagePath: string;
   outputDir: string;
   pageNumber: number;
+  visionBudget?: VisionBudget;
 }): Promise<PageDetectionResult> {
-  // Try the vision detector first when configured.
-  if (isVisionDetectorConfigured()) {
-    try {
-      const result = await runVisionDetector(args);
-      const searchable = result.candidates.filter((c) => c.isSearchable).length;
-      console.log(
-        `[detector] page ${args.pageNumber}: VISION → raw=${result.pageAnalysis.productsCount} valid=${result.candidates.length} searchable=${searchable}`
-      );
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!(err instanceof VisionDetectorUnavailableError)) {
-        console.error(
-          `[detector] page ${args.pageNumber}: vision failed (${msg}) → heuristic fallback`
-        );
-      }
-      const heuristic = await runHeuristicDetector(args);
-      const searchable = heuristic.filter((c) => c.isSearchable).length;
-      console.log(
-        `[detector] page ${args.pageNumber}: FALLBACK → ${heuristic.length} candidates, ${searchable} searchable`
-      );
-      return {
-        candidates: heuristic.map((c) => ({
-          ...c,
-          sourceDetector: "FALLBACK" as const,
-        })),
-        pageAnalysis: {
-          productsCount: heuristic.length,
-          error: msg,
-          sourceDetector: "FALLBACK",
-        },
-      };
-    }
+  const mode = getVisionMode();
+  const visionConfigured = isVisionDetectorConfigured();
+  const cheapModel = getCheapVisionModel();
+  const premiumModel = getPremiumVisionModel();
+  const premiumFallback = isPremiumFallbackEnabled();
+  const budget = args.visionBudget;
+  const budgetBefore = budget?.remaining;
+
+  // ── Mode: off, or vision not configured → heuristic-only ────────────────
+  if (mode === "off" || !visionConfigured || !cheapModel) {
+    const heuristic = await runHeuristicDetector(args);
+    const searchable = heuristic.filter((c) => c.isSearchable).length;
+    const reason =
+      mode === "off"
+        ? "mode=off"
+        : !visionConfigured
+          ? "vision_not_configured"
+          : "no_cheap_model";
+    console.log(
+      `[detector] page ${args.pageNumber}: HEURISTIC (${reason}) → ${heuristic.length} candidates, ${searchable} searchable`
+    );
+    return makeHeuristicResult(heuristic, {
+      decision: mode === "off" ? "VISION_OFF" : "HEURISTIC",
+      sourceDetector: "HEURISTIC",
+      visionCallsMade: 0,
+      budgetRemainingBefore: budgetBefore,
+      budgetRemainingAfter: budgetBefore,
+    });
   }
 
-  // No vision config → use heuristic as the primary detector.
-  console.log(
-    `[detector] page ${args.pageNumber}: HEURISTIC (vision detector not configured)`
-  );
-  const heuristic = await runHeuristicDetector(args);
-  const searchable = heuristic.filter((c) => c.isSearchable).length;
-  console.log(
-    `[detector] page ${args.pageNumber}: HEURISTIC → ${heuristic.length} candidates, ${searchable} searchable`
-  );
-  return {
-    candidates: heuristic.map((c) => ({
-      ...c,
-      sourceDetector: "HEURISTIC" as const,
-    })),
-    pageAnalysis: {
-      productsCount: heuristic.length,
-      sourceDetector: "HEURISTIC",
-    },
-  };
+  // ── Mode: auto → heuristic first, escalate only when needed ─────────────
+  let heuristicCandidates: DetectedCandidate[] | undefined;
+  let heuristicQuality: HeuristicQuality | undefined;
+
+  if (mode === "auto") {
+    heuristicCandidates = await runHeuristicDetector(args);
+    heuristicQuality = evaluateHeuristicQuality(heuristicCandidates);
+
+    if (heuristicQuality.good) {
+      const searchable = heuristicCandidates.filter((c) => c.isSearchable).length;
+      console.log(
+        `[detector] page ${args.pageNumber}: HEURISTIC accepted (searchable=${searchable}, avg=${heuristicQuality.averageQuality.toFixed(2)}), no vision call`
+      );
+      return makeHeuristicResult(heuristicCandidates, {
+        decision: "HEURISTIC",
+        sourceDetector: "HEURISTIC",
+        visionCallsMade: 0,
+        budgetRemainingBefore: budgetBefore,
+        budgetRemainingAfter: budgetBefore,
+      });
+    }
+
+    // Heuristic rejected — but only escalate if budget allows.
+    if (budget && budget.remaining <= 0) {
+      const searchable = heuristicCandidates.filter((c) => c.isSearchable).length;
+      console.warn(
+        `[detector] page ${args.pageNumber}: HEURISTIC rejected (${heuristicQuality.reason}) but vision budget exhausted → using heuristic (${searchable} searchable)`
+      );
+      return makeHeuristicResult(heuristicCandidates, {
+        decision: "BUDGET_EXCEEDED",
+        sourceDetector: "HEURISTIC",
+        heuristicQualityReason: heuristicQuality.reason,
+        visionCallsMade: 0,
+        budgetRemainingBefore: budgetBefore,
+        budgetRemainingAfter: 0,
+        error: `budget_exceeded; heuristic_quality=${heuristicQuality.reason}`,
+      });
+    }
+
+    console.log(
+      `[detector] page ${args.pageNumber}: HEURISTIC rejected (${heuristicQuality.reason}) → VISION cheap`
+    );
+  }
+
+  // ── Call cheap vision model ─────────────────────────────────────────────
+  let visionCalls = 0;
+  try {
+    if (budget) budget.remaining = Math.max(0, budget.remaining - 1);
+    visionCalls++;
+    const cheapResult = await runVisionDetector({
+      pageImagePath: args.pageImagePath,
+      outputDir: args.outputDir,
+      pageNumber: args.pageNumber,
+      model: cheapModel,
+      sourceDetector: "VISION_JSON_CHEAP",
+    });
+    const cheapSearchable = cheapResult.candidates.filter(
+      (c) => c.isSearchable
+    ).length;
+    console.log(
+      `[detector] page ${args.pageNumber}: VISION cheap (${cheapModel}) raw=${cheapResult.pageAnalysis.productsCount} valid=${cheapResult.candidates.length} searchable=${cheapSearchable}`
+    );
+
+    const shouldTryPremium =
+      premiumFallback &&
+      premiumModel &&
+      premiumModel !== cheapModel &&
+      cheapResult.pageAnalysis.productsCount === 0 &&
+      // Page looked productful per heuristic — worth a second opinion.
+      heuristicQuality !== undefined &&
+      heuristicQuality.expectedMin > 0 &&
+      (!budget || budget.remaining > 0);
+
+    if (shouldTryPremium) {
+      try {
+        if (budget) budget.remaining = Math.max(0, budget.remaining - 1);
+        visionCalls++;
+        const premiumResult = await runVisionDetector({
+          pageImagePath: args.pageImagePath,
+          outputDir: args.outputDir,
+          pageNumber: args.pageNumber,
+          model: premiumModel,
+          sourceDetector: "VISION_JSON_PREMIUM",
+        });
+        const premiumSearchable = premiumResult.candidates.filter(
+          (c) => c.isSearchable
+        ).length;
+        console.log(
+          `[detector] page ${args.pageNumber}: VISION premium (${premiumModel}) raw=${premiumResult.pageAnalysis.productsCount} valid=${premiumResult.candidates.length} searchable=${premiumSearchable}`
+        );
+        return {
+          ...premiumResult,
+          stats: {
+            decision: "VISION_PREMIUM",
+            modelUsed: premiumModel,
+            visionCallsMade: visionCalls,
+            heuristicQualityReason: heuristicQuality?.reason,
+            budgetRemainingBefore: budgetBefore,
+            budgetRemainingAfter: budget?.remaining,
+          },
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[detector] page ${args.pageNumber}: VISION premium failed (${msg}) → keeping cheap result`
+        );
+      }
+    }
+
+    return {
+      ...cheapResult,
+      stats: {
+        decision: "VISION_CHEAP",
+        modelUsed: cheapModel,
+        visionCallsMade: visionCalls,
+        heuristicQualityReason: heuristicQuality?.reason,
+        budgetRemainingBefore: budgetBefore,
+        budgetRemainingAfter: budget?.remaining,
+      },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!(err instanceof VisionDetectorUnavailableError)) {
+      console.error(
+        `[detector] page ${args.pageNumber}: VISION cheap failed (${msg}) → fallback`
+      );
+    }
+
+    // Fall back to the heuristic result we may already have, or compute one.
+    const heuristic =
+      heuristicCandidates ?? (await runHeuristicDetector(args));
+    const searchable = heuristic.filter((c) => c.isSearchable).length;
+    console.log(
+      `[detector] page ${args.pageNumber}: FALLBACK → ${heuristic.length} candidates, ${searchable} searchable`
+    );
+    return makeHeuristicResult(heuristic, {
+      decision: "FALLBACK",
+      sourceDetector: "FALLBACK",
+      heuristicQualityReason: heuristicQuality?.reason,
+      visionCallsMade: visionCalls,
+      budgetRemainingBefore: budgetBefore,
+      budgetRemainingAfter: budget?.remaining,
+      error: msg,
+    });
+  }
 }

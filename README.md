@@ -24,6 +24,37 @@ DIRECT_URL                # Supabase direct connection (Prisma CLI migrations)
 SUPABASE_URL              # https://xxx.supabase.co
 SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY # necessário para upload server-side
+
+# Detector visual (cascata — opcional)
+VISION_DETECTOR_PROVIDER       # 'openai' | 'anthropic'
+VISION_DETECTOR_API_KEY
+VISION_DETECTOR_MODE           # 'auto' (default) | 'always' | 'off'
+VISION_DETECTOR_MODEL_CHEAP    # modelo barato (chamado primeiro)
+VISION_DETECTOR_MODEL_PREMIUM  # modelo caro (só com fallback ligado)
+VISION_USE_PREMIUM_FALLBACK    # 'true' | 'false' (default false)
+CATALOG_MAX_VISION_PAGES       # teto de chamadas com visão por catálogo (default 20)
+```
+
+### Pipeline de detecção em cascata
+
+`auto` (padrão) só chama o modelo de visão quando a heurística local falha
+(poucos produtos, crops anormais, qualidade média baixa). Em testes use o
+modelo barato e mantenha `VISION_USE_PREMIUM_FALLBACK=false`. O premium só
+deve ser ligado para resgatar páginas específicas — nunca em catálogo
+inteiro sem limite.
+
+`CATALOG_MAX_VISION_PAGES` é um teto absoluto por catálogo: ao atingir o
+limite as páginas restantes ficam com a heurística mesmo no `auto`.
+
+Configuração recomendada para teste barato:
+
+```env
+VISION_DETECTOR_PROVIDER=openai
+VISION_DETECTOR_MODE=auto
+VISION_DETECTOR_MODEL_CHEAP=gpt-5.4-mini
+VISION_DETECTOR_MODEL_PREMIUM=gpt-5.5
+VISION_USE_PREMIUM_FALLBACK=false
+CATALOG_MAX_VISION_PAGES=20
 ```
 
 ## Dependências de sistema

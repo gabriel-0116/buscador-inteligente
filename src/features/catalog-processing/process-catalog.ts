@@ -7,7 +7,14 @@ import { prisma } from "@/lib/prisma";
 import { uploadImageToStorage, supabaseAdmin } from "@/lib/supabase";
 import { generateImageEmbeddingFromPath } from "@/features/visual-search/embeddings";
 import { renderPdfPagesToImages } from "./render-pages";
-import { detectProductCandidatesFromPage } from "./detect-product-candidates";
+import {
+  detectProductCandidatesFromPage,
+  type DetectionDecision,
+} from "./detect-product-candidates";
+import {
+  getMaxVisionPagesPerCatalog,
+  getVisionMode,
+} from "./vision-json-detector";
 
 export async function processCatalog(
   catalogId: string,
@@ -39,6 +46,24 @@ export async function processCatalog(
     let pageCount = 0;
     let candidateCount = 0;
 
+    // Per-catalog vision call budget — protects against runaway costs.
+    const maxVisionPages = getMaxVisionPagesPerCatalog();
+    const visionBudget = { remaining: maxVisionPages };
+    const visionMode = getVisionMode();
+    const decisionCounts: Record<DetectionDecision, number> = {
+      HEURISTIC: 0,
+      VISION_CHEAP: 0,
+      VISION_PREMIUM: 0,
+      FALLBACK: 0,
+      BUDGET_EXCEEDED: 0,
+      VISION_OFF: 0,
+    };
+    let totalVisionCalls = 0;
+    const modelsUsed = new Set<string>();
+    console.log(
+      `[catalog ${catalogId}] mode=${visionMode} maxVisionPages=${maxVisionPages} totalPages=${renderedPages.length}`
+    );
+
     for (const { pageNumber, imagePath } of renderedPages) {
       try {
         // ── Save rendered page ──────────────────────────────────────────────
@@ -66,11 +91,17 @@ export async function processCatalog(
         pageCount++;
 
         // ── Detect candidates ───────────────────────────────────────────────
-        const { candidates, pageAnalysis } = await detectProductCandidatesFromPage({
-          pageImagePath: imagePath,
-          outputDir: candidatesDir,
-          pageNumber,
-        });
+        const { candidates, pageAnalysis, stats } =
+          await detectProductCandidatesFromPage({
+            pageImagePath: imagePath,
+            outputDir: candidatesDir,
+            pageNumber,
+            visionBudget,
+          });
+
+        decisionCounts[stats.decision]++;
+        totalVisionCalls += stats.visionCallsMade;
+        if (stats.modelUsed) modelsUsed.add(stats.modelUsed);
 
         // Persist the raw analysis for auditing / future retries.
         if (pageAnalysis.rawJson !== undefined || pageAnalysis.error) {
@@ -179,6 +210,10 @@ export async function processCatalog(
         console.error(`Erro ao processar página ${pageNumber}:`, err);
       }
     }
+
+    console.log(
+      `[catalog ${catalogId}] summary: totalPages=${pageCount} heuristicPages=${decisionCounts.HEURISTIC} visionCheapPages=${decisionCounts.VISION_CHEAP} visionPremiumPages=${decisionCounts.VISION_PREMIUM} fallbackPages=${decisionCounts.FALLBACK} budgetExceededPages=${decisionCounts.BUDGET_EXCEEDED} visionOffPages=${decisionCounts.VISION_OFF} estimatedVisionCalls=${totalVisionCalls} budgetRemaining=${visionBudget.remaining}/${maxVisionPages} modelsUsed=${[...modelsUsed].join(",") || "none"}`
+    );
 
     await prisma.catalog.update({
       where: { id: catalogId },
