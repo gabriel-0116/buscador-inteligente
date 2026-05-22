@@ -138,3 +138,85 @@ export function parseVisionJsonResponse(text: string): PageAnalysisJson {
   }
   return result.data;
 }
+
+// ── Boxes-only schema (current MVP) ─────────────────────────────────────────
+//
+// The MVP only needs bounding boxes. The model is asked for the smallest
+// possible JSON; no productName, category, descriptionPt, etc. This cuts
+// token cost and lets us treat metadata as a future concern.
+
+export const VisionBoxSchema = z.object({
+  x: z.number().finite(),
+  y: z.number().finite(),
+  width: z.number().finite().positive(),
+  height: z.number().finite().positive(),
+  // Confidence is optional in the wire format; defaults to 0.75 when missing.
+  confidence: z
+    .number()
+    .finite()
+    .transform((n) => Math.max(0, Math.min(1, n)))
+    .optional(),
+});
+
+export const PageBoxesSchema = z.object({
+  pageNumber: z.number().int().nonnegative().optional(),
+  boxes: z.array(VisionBoxSchema).default([]),
+});
+
+export type VisionBox = z.infer<typeof VisionBoxSchema> & { confidence: number };
+export type PageBoxesJson = {
+  pageNumber?: number;
+  boxes: VisionBox[];
+};
+
+const DEFAULT_CONFIDENCE = 0.75;
+
+/**
+ * Parse a vision model's response into a validated boxes-only result.
+ *
+ * Accepts:
+ *   1. New format: `{ "pageNumber": N, "boxes": [{ x, y, width, height, confidence? }] }`
+ *   2. Legacy format: `{ "pageNumber": N, "products": [{ box: {...}, confidence, ... }] }` —
+ *      product metadata fields are dropped on the way through.
+ *
+ * Throws `VisionJsonParseError` on irrecoverable failure.
+ */
+export function parseVisionBoxesResponse(text: string): PageBoxesJson {
+  const parsed = tryParse(text);
+
+  // 1) Try new format first.
+  const newShape = PageBoxesSchema.safeParse(parsed);
+  if (newShape.success) {
+    return {
+      pageNumber: newShape.data.pageNumber,
+      boxes: newShape.data.boxes.map((b) => ({
+        x: b.x,
+        y: b.y,
+        width: b.width,
+        height: b.height,
+        confidence: b.confidence ?? DEFAULT_CONFIDENCE,
+      })),
+    };
+  }
+
+  // 2) Fall back to legacy format (products[].box).
+  const legacyShape = PageAnalysisSchema.safeParse(parsed);
+  if (legacyShape.success) {
+    return {
+      pageNumber: legacyShape.data.pageNumber,
+      boxes: legacyShape.data.products.map((p) => ({
+        x: p.box.x,
+        y: p.box.y,
+        width: p.box.width,
+        height: p.box.height,
+        confidence: p.confidence,
+      })),
+    };
+  }
+
+  throw new VisionJsonParseError(
+    `Vision response failed both boxes-only and legacy schemas: ${newShape.error.message}`,
+    text,
+    newShape.error
+  );
+}

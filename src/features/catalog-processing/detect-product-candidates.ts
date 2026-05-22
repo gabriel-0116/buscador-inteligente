@@ -2,27 +2,39 @@ import sharp from "sharp";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  detectProductsJsonWithVision,
+  detectProductBoxesWithVision,
   getCheapVisionModel,
   getPremiumVisionModel,
   getVisionMode,
   isPremiumFallbackEnabled,
   isVisionDetectorConfigured,
+  prepareVisionInputImage,
   VisionDetectorUnavailableError,
 } from "./vision-json-detector";
+import { dedupeBoxesByIoU, validateVisionBoxes } from "./vision-box-validator";
 import {
-  dedupeBoxesByIoU,
-  validateVisionBoxes,
-} from "./vision-box-validator";
+  dedupeRefinedByIoU,
+  evaluateBoxBoundary,
+  refineVisionBoxToCard,
+  type RefinedCandidate,
+} from "./vision-box-refinement";
+import { rm } from "node:fs/promises";
+import type { PageProduct } from "./product-json-schema";
+import { detectCardsFromPdfLayout } from "./pdf-layout-card-detector";
+import type { PdfLayoutPage } from "./pdf-layout-extractor";
 
 export type SourceDetector =
-  | "VISION_JSON"
-  | "VISION_JSON_CHEAP"
-  | "VISION_JSON_PREMIUM"
+  | "VISION_JSON" // legacy — kept for old rows
+  | "VISION_JSON_CHEAP" // legacy — kept for old rows
+  | "VISION_JSON_PREMIUM" // legacy — kept for old rows
+  | "VISION_BOXES_CHEAP" // MVP cheap model (boxes-only)
+  | "VISION_BOXES_PREMIUM" // MVP premium model (boxes-only)
+  | "PDF_LAYOUT" // primary: PyMuPDF structure → card clusters
   | "HEURISTIC"
   | "FALLBACK";
 
 export type DetectionDecision =
+  | "PDF_LAYOUT"
   | "HEURISTIC"
   | "VISION_CHEAP"
   | "VISION_PREMIUM"
@@ -50,6 +62,7 @@ export type DetectedCandidate = {
   height: number;
   confidence: number;
   qualityScore: number;
+  boundaryScore?: number;
   isSearchable: boolean;
   rejectReason?: string;
   // Structured metadata produced by the vision detector. All optional —
@@ -93,6 +106,23 @@ const GAP_DENSITY = 0.04;
 const MIN_GAP_SPAN = 8;
 // Minimum vision-model confidence to allow a candidate into the search index.
 const VISION_CONFIDENCE_FLOOR = 0.45;
+// Minimum boundary score (clean edges, no neighbor-card bleed) for vision crops.
+const BOUNDARY_THRESHOLD = 0.6;
+// Confidence assigned to PDF-structure cards (trustworthy geometry).
+const PDF_LAYOUT_CONFIDENCE = 0.85;
+
+// ── Hard card constraints (applied to heuristic + PDF_LAYOUT crops) ──────────
+//
+// These exist because the heuristic happily accepted whole columns / pages as
+// "good" cards. A searchable crop must look like a single product, not a
+// column or a slab of the page.
+//
+// Absolute pixel ceiling (original render space). A crop this big is a column
+// or page slab, never one product (e.g. 869×1713 from ELETROMEX).
+const ABS_MAX_CARD_WIDTH = 750;
+const ABS_MAX_CARD_HEIGHT = 1000;
+// A single card must not cover more than this fraction of the page.
+const MAX_SEARCHABLE_AREA_RATIO = 0.35;
 
 type Box = { x1: number; y1: number; x2: number; y2: number };
 
@@ -116,6 +146,9 @@ const SEVERE_REJECTS = new Set([
   "invalid_json",
   "duplicate",
   "low_confidence",
+  "bad_card_boundary",
+  "low_boundary",
+  "multi_card_crop",
 ]);
 
 // ── Low-level pixel helpers ──────────────────────────────────────────────────
@@ -339,7 +372,11 @@ function calculateCardQuality(args: {
     return { score: 0, rejectReason: "mostly_white" };
   }
 
-  const barCheck = isColorBarDominant(stats.greenRatio, stats.orangeRatio, aspectRatio);
+  const barCheck = isColorBarDominant(
+    stats.greenRatio,
+    stats.orangeRatio,
+    aspectRatio
+  );
   if (barCheck.isBar) {
     return { score: 0, rejectReason: barCheck.reason };
   }
@@ -415,7 +452,8 @@ async function evaluateCropImageQuality(
   const meta = await sharp(imagePath).metadata();
   const origW = meta.width ?? 0;
   const origH = meta.height ?? 0;
-  if (origW === 0 || origH === 0) return { score: 0, rejectReason: "invalid_box" };
+  if (origW === 0 || origH === 0)
+    return { score: 0, rejectReason: "invalid_box" };
 
   const ANALYSIS_W = 600;
   const scale = Math.min(1, ANALYSIS_W / origW);
@@ -432,11 +470,17 @@ async function evaluateCropImageQuality(
   const fullBox: Box = { x1: 0, y1: 0, x2: w - 1, y2: h - 1 };
   const stats = pixelStats(data, info.channels, w, fullBox);
 
-  if (stats.whiteRatio > 0.92) return { score: 0, rejectReason: "mostly_white" };
-  if (stats.nonWhiteRatio < 0.04) return { score: 0, rejectReason: "insufficient_content" };
+  if (stats.whiteRatio > 0.92)
+    return { score: 0, rejectReason: "mostly_white" };
+  if (stats.nonWhiteRatio < 0.04)
+    return { score: 0, rejectReason: "insufficient_content" };
 
   const aspectRatio = w / h;
-  const barCheck = isColorBarDominant(stats.greenRatio, stats.orangeRatio, aspectRatio);
+  const barCheck = isColorBarDominant(
+    stats.greenRatio,
+    stats.orangeRatio,
+    aspectRatio
+  );
   if (barCheck.isBar) return { score: 0, rejectReason: barCheck.reason };
 
   const central = centralMassRatio(data, info.channels, w, fullBox);
@@ -477,16 +521,139 @@ async function evaluateCropImageQuality(
   return { score };
 }
 
+// ── Multi-card detection ─────────────────────────────────────────────────────
+//
+// A crop is "multi-card" when it stacks several products vertically (a column
+// or a slab of the grid) instead of showing one. Signals: extreme tall aspect,
+// and/or multiple dense content bands separated by deep horizontal whitespace
+// gaps (each band = one product's photo+caption).
+
+/** Count vertical content bands separated by deep whitespace gaps. */
+function countContentBands(
+  rowDens: number[],
+  minBandDensity: number,
+  minBandHeight: number
+): number {
+  const h = rowDens.length;
+  const gaps = findGaps(rowDens, 0.02, Math.max(4, Math.round(h * 0.02)));
+  const segments: Array<[number, number]> = [];
+  let start = 0;
+  for (const [gs, ge] of gaps) {
+    if (gs > start) segments.push([start, gs - 1]);
+    start = ge + 1;
+  }
+  if (start < h) segments.push([start, h - 1]);
+
+  let bands = 0;
+  for (const [s, e] of segments) {
+    const len = e - s + 1;
+    if (len < minBandHeight) continue;
+    let sum = 0;
+    for (let i = s; i <= e; i++) sum += rowDens[i];
+    if (sum / len >= minBandDensity) bands++;
+  }
+  return bands;
+}
+
+/**
+ * True when a crop looks like several stacked products rather than one card.
+ * Operates on the cropped image directly so it works for both the heuristic
+ * and PDF_LAYOUT paths.
+ */
+async function looksLikeMultiCardCrop(imagePath: string): Promise<boolean> {
+  const meta = await sharp(imagePath).metadata();
+  const ow = meta.width ?? 0;
+  const oh = meta.height ?? 0;
+  if (ow === 0 || oh === 0) return false;
+
+  const aspectHW = oh / ow;
+  // A crop ~3× taller than wide is a column no matter what's inside it.
+  if (aspectHW > 3.0) return true;
+
+  const ANALYSIS_W = 360;
+  const scale = Math.min(1, ANALYSIS_W / ow);
+  const w = Math.max(1, Math.round(ow * scale));
+  const h = Math.max(1, Math.round(oh * scale));
+  const { data, info } = await sharp(imagePath)
+    .resize(w, h, { fit: "fill" })
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .toColorspace("srgb")
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const fullBox: Box = { x1: 0, y1: 0, x2: w - 1, y2: h - 1 };
+  const rDens = rowDensities(data, info.channels, w, fullBox);
+  // Only count *tall* content bands (a product photo). Multi-line captions are
+  // thin bands and must not be mistaken for stacked products.
+  const minBandHeight = Math.max(8, Math.round(h * 0.18));
+  const bands = countContentBands(rDens, 0.06, minBandHeight);
+
+  // Tall-ish crop with two clearly separated photo-sized bands → stacked products.
+  if (aspectHW > 1.7 && bands >= 2) return true;
+  // Three or more photo-sized bands at any aspect → a slab of the grid.
+  if (bands >= 3) return true;
+  return false;
+}
+
+/**
+ * Mutate `candidates` in place: demote any searchable crop that violates the
+ * single-card constraints (absolute size, page-area share, or multi-card
+ * stacking). Used after both the heuristic and PDF_LAYOUT detectors.
+ */
+async function enforceHardCardRules(
+  candidates: DetectedCandidate[],
+  pageWidthOrig: number,
+  pageHeightOrig: number
+): Promise<void> {
+  const pageArea = pageWidthOrig * pageHeightOrig;
+  for (const c of candidates) {
+    if (!c.isSearchable) continue;
+    const aspectWH = c.height > 0 ? c.width / c.height : 1;
+    const areaRatio = pageArea > 0 ? (c.width * c.height) / pageArea : 0;
+
+    if (c.width >= ABS_MAX_CARD_WIDTH && c.height >= ABS_MAX_CARD_HEIGHT) {
+      rejectCandidate(c, "too_large");
+      continue;
+    }
+    if (areaRatio > MAX_SEARCHABLE_AREA_RATIO) {
+      rejectCandidate(c, "card_too_large");
+      continue;
+    }
+    if (aspectWH > 3.2) {
+      rejectCandidate(c, "horizontal_bar");
+      continue;
+    }
+    try {
+      if (await looksLikeMultiCardCrop(c.imagePath)) {
+        rejectCandidate(c, "multi_card_crop");
+        continue;
+      }
+    } catch {
+      // Multi-card analysis is best-effort; never fail a crop on its account.
+    }
+  }
+}
+
+function rejectCandidate(c: DetectedCandidate, reason: string): void {
+  c.isSearchable = false;
+  if (!c.rejectReason) c.rejectReason = reason;
+}
+
 // ── Gap detection / region splitting ────────────────────────────────────────
 
-function findGaps(densities: number[], threshold: number, minSpan: number): number[][] {
+function findGaps(
+  densities: number[],
+  threshold: number,
+  minSpan: number
+): number[][] {
   const gaps: number[][] = [];
   let gapStart = -1;
   for (let i = 0; i < densities.length; i++) {
     if (densities[i] < threshold) {
       if (gapStart < 0) gapStart = i;
     } else {
-      if (gapStart >= 0 && i - gapStart >= minSpan) gaps.push([gapStart, i - 1]);
+      if (gapStart >= 0 && i - gapStart >= minSpan)
+        gaps.push([gapStart, i - 1]);
       gapStart = -1;
     }
   }
@@ -557,7 +724,9 @@ function detectCardGridFromPage(args: {
     const cDens = colDensities(data, channels, width, rowRegion);
     const colGaps = findGaps(cDens, GAP_DENSITY, MIN_GAP_SPAN);
     const cols =
-      colGaps.length > 0 ? gapsToRegions(rowRegion, colGaps, "col") : [rowRegion];
+      colGaps.length > 0
+        ? gapsToRegions(rowRegion, colGaps, "col")
+        : [rowRegion];
     cells.push(...cols);
   }
   return cells;
@@ -670,8 +839,14 @@ async function runHeuristicDetector(args: {
 
     const sx = clampX(toOrig(box.x1));
     const sy = clampY(toOrig(box.y1));
-    const sw = Math.max(1, Math.min(origWidth - sx, toOrig(box.x2 - box.x1 + 1)));
-    const sh = Math.max(1, Math.min(origHeight - sy, toOrig(box.y2 - box.y1 + 1)));
+    const sw = Math.max(
+      1,
+      Math.min(origWidth - sx, toOrig(box.x2 - box.x1 + 1))
+    );
+    const sh = Math.max(
+      1,
+      Math.min(origHeight - sy, toOrig(box.y2 - box.y1 + 1))
+    );
 
     if (sw < MIN_CARD_PX_ORIG || sh < MIN_CARD_PX_ORIG) continue;
 
@@ -702,6 +877,140 @@ async function runHeuristicDetector(args: {
   return results;
 }
 
+/** Run the heuristic detector, then apply the single-card hard rules. */
+async function runHeuristicWithRules(
+  args: { pageImagePath: string; outputDir: string; pageNumber: number },
+  renderedWidth: number,
+  renderedHeight: number
+): Promise<DetectedCandidate[]> {
+  const candidates = await runHeuristicDetector(args);
+  if (renderedWidth > 0 && renderedHeight > 0) {
+    await enforceHardCardRules(candidates, renderedWidth, renderedHeight);
+  }
+  return candidates;
+}
+
+// ── PDF_LAYOUT detector (primary) ─────────────────────────────────────────────
+//
+// Crops the card boxes produced from the PDF's real structure (PyMuPDF), then
+// reuses the same standalone quality scorer the vision path uses. Hard card
+// rules are applied by the caller via enforceHardCardRules.
+
+async function runPdfLayoutDetector(args: {
+  pageImagePath: string;
+  outputDir: string;
+  pageNumber: number;
+  pageLayout: PdfLayoutPage;
+  renderedWidth: number;
+  renderedHeight: number;
+}): Promise<{
+  candidates: DetectedCandidate[];
+  pageAnalysis: PageAnalysisInfo;
+}> {
+  await mkdir(args.outputDir, { recursive: true });
+
+  const cards = detectCardsFromPdfLayout({
+    pageLayout: args.pageLayout,
+    renderedPageWidth: args.renderedWidth,
+    renderedPageHeight: args.renderedHeight,
+  });
+
+  const candidates: DetectedCandidate[] = [];
+  let cropIndex = 1;
+  for (const card of cards) {
+    const sx = Math.max(
+      0,
+      Math.min(args.renderedWidth - 1, Math.round(card.x))
+    );
+    const sy = Math.max(
+      0,
+      Math.min(args.renderedHeight - 1, Math.round(card.y))
+    );
+    const sw = Math.max(
+      1,
+      Math.min(args.renderedWidth - sx, Math.round(card.width))
+    );
+    const sh = Math.max(
+      1,
+      Math.min(args.renderedHeight - sy, Math.round(card.height))
+    );
+
+    const prefix = `page-${String(args.pageNumber).padStart(3, "0")}-pdf-${String(cropIndex).padStart(2, "0")}`;
+    const imagePath = join(args.outputDir, `${prefix}.jpg`);
+    try {
+      await sharp(args.pageImagePath)
+        .extract({ left: sx, top: sy, width: sw, height: sh })
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .jpeg({ quality: 90 })
+        .toFile(imagePath);
+    } catch (err) {
+      console.error(
+        `[pdf-layout] page ${args.pageNumber} crop ${cropIndex} extract failed:`,
+        err
+      );
+      continue;
+    }
+
+    const quality = await evaluateCropImageQuality(imagePath);
+    candidates.push({
+      imagePath,
+      x: sx,
+      y: sy,
+      width: sw,
+      height: sh,
+      confidence: PDF_LAYOUT_CONFIDENCE,
+      qualityScore: quality.score,
+      isSearchable: shouldIndexCrop(quality.score, quality.rejectReason),
+      rejectReason: quality.rejectReason,
+      sourceDetector: "PDF_LAYOUT",
+      originalText: card.text,
+    });
+    cropIndex++;
+  }
+
+  return {
+    candidates,
+    pageAnalysis: {
+      productsCount: cards.length,
+      sourceDetector: "PDF_LAYOUT",
+    },
+  };
+}
+
+type PdfLayoutQuality = {
+  good: boolean;
+  reason: string;
+  searchableCount: number;
+};
+
+/**
+ * Decide whether the PDF_LAYOUT result is trustworthy enough to skip the
+ * heuristic / vision tiers. A page with no product photos is trusted to have
+ * no products (no escalation). Otherwise we need at least one searchable card;
+ * if every cluster failed the quality / hard-rule checks, the page is probably
+ * scanned or oddly structured → escalate.
+ */
+function evaluatePdfLayoutQuality(
+  candidates: DetectedCandidate[],
+  pageLayout: PdfLayoutPage
+): PdfLayoutQuality {
+  const imageBlocks = pageLayout.blocks.filter(
+    (b) => b.type === "image"
+  ).length;
+  const searchableCount = candidates.filter((c) => c.isSearchable).length;
+  if (imageBlocks === 0) {
+    return { good: true, reason: "no_product_images", searchableCount };
+  }
+  if (searchableCount >= 1) {
+    return {
+      good: true,
+      reason: `searchable=${searchableCount}`,
+      searchableCount,
+    };
+  }
+  return { good: false, reason: "no_searchable_clusters", searchableCount };
+}
+
 // ── Vision-detector pipeline ────────────────────────────────────────────────
 
 async function runVisionDetector(args: {
@@ -709,46 +1018,136 @@ async function runVisionDetector(args: {
   outputDir: string;
   pageNumber: number;
   model: string;
-  sourceDetector: "VISION_JSON_CHEAP" | "VISION_JSON_PREMIUM";
-}): Promise<{ candidates: DetectedCandidate[]; pageAnalysis: PageAnalysisInfo }> {
+  sourceDetector: "VISION_BOXES_CHEAP" | "VISION_BOXES_PREMIUM";
+}): Promise<{
+  candidates: DetectedCandidate[];
+  pageAnalysis: PageAnalysisInfo;
+}> {
   await mkdir(args.outputDir, { recursive: true });
 
   const meta = await sharp(args.pageImagePath).metadata();
   const pageWidth = meta.width ?? 0;
   const pageHeight = meta.height ?? 0;
 
-  const vision = await detectProductsJsonWithVision({
+  // Send a downscaled JPEG to the model — cheaper tokens, same boxes.
+  const prepared = await prepareVisionInputImage({
     pageImagePath: args.pageImagePath,
-    pageNumber: args.pageNumber,
-    pageWidth,
-    pageHeight,
-    modelOverride: args.model,
   });
 
+  let vision;
+  try {
+    vision = await detectProductBoxesWithVision({
+      pageImagePath: prepared.imagePath,
+      pageNumber: args.pageNumber,
+      pageWidth: prepared.width,
+      pageHeight: prepared.height,
+      modelOverride: args.model,
+    });
+  } finally {
+    // Always clean up the temporary downscaled JPEG.
+    await rm(prepared.imagePath, { force: true }).catch(() => {});
+  }
+
+  // Boxes returned by the model live in the downscaled image. Scale them
+  // back to the original page coordinate space before we do anything else.
+  const scaledProducts: PageProduct[] = vision.boxes.map((b) => ({
+    box: {
+      x: b.x * prepared.scaleX,
+      y: b.y * prepared.scaleY,
+      width: b.width * prepared.scaleX,
+      height: b.height * prepared.scaleY,
+    },
+    confidence: b.confidence,
+    productName: null,
+    productNamePt: null,
+    category: null,
+    functionGroup: null,
+    model: null,
+    originalText: null,
+    descriptionPt: null,
+  }));
+
   const validated = validateVisionBoxes({
-    products: vision.products,
+    products: scaledProducts,
     pageWidth,
     pageHeight,
   });
   const deduped = dedupeBoxesByIoU(validated, 0.65);
 
+  // ── Pre-refinement pass: refine the box for every non-rejected product ──
+  //
+  // The model's box is treated as a seed only. We snap it to natural
+  // whitespace gaps so the resulting crop matches the *visual* card, not
+  // the model's loose estimate.
+  type Pending = RefinedCandidate<{
+    product: (typeof deduped)[number];
+    rejectReason?: string;
+    refineReason?: string;
+  }>;
+
+  const pending: Pending[] = [];
+  for (const product of deduped) {
+    if (product.rejectReason) {
+      // Already rejected by geometric validation — skip refinement, keep as debug.
+      pending.push({
+        box: product.box,
+        visionConfidence: product.confidence,
+        boundaryScore: 0,
+        qualityScore: 0,
+        product,
+        rejectReason: product.rejectReason,
+      });
+      continue;
+    }
+
+    let workingBox = product.box;
+    let refineReason: string | undefined;
+    try {
+      const refined = await refineVisionBoxToCard({
+        pageImagePath: args.pageImagePath,
+        box: product.box,
+        pageWidth,
+        pageHeight,
+      });
+      workingBox = refined.box;
+      refineReason = refined.reason;
+      if (refined.changed) {
+        console.log(
+          `[vision-refine] page ${args.pageNumber}: box snapped (${refined.reason ?? "snap"}) ${formatBox(product.box)} → ${formatBox(refined.box)}`
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[vision-refine] page ${args.pageNumber}: refine failed (${err instanceof Error ? err.message : String(err)})`
+      );
+    }
+
+    pending.push({
+      box: workingBox,
+      visionConfidence: product.confidence,
+      boundaryScore: 0,
+      qualityScore: 0,
+      product,
+      refineReason,
+    });
+  }
+
+  // ── Re-dedupe post-refinement: two model boxes can snap to the same card ──
+  const dedupedPending = dedupeRefinedByIoU(pending, 0.55);
+
+  // ── Final pass: crop, score, decide ────────────────────────────────────
   const candidates: DetectedCandidate[] = [];
   let cropIndex = 1;
 
-  for (const product of deduped) {
-    const { box } = product;
-    let { rejectReason } = product;
+  for (const item of dedupedPending) {
+    const product = item.product;
+    let rejectReason = item.rejectReason;
+    const box = item.box;
 
     const sx = Math.max(0, Math.min(pageWidth - 1, Math.round(box.x)));
     const sy = Math.max(0, Math.min(pageHeight - 1, Math.round(box.y)));
-    const sw = Math.max(
-      1,
-      Math.min(pageWidth - sx, Math.round(box.width))
-    );
-    const sh = Math.max(
-      1,
-      Math.min(pageHeight - sy, Math.round(box.height))
-    );
+    const sw = Math.max(1, Math.min(pageWidth - sx, Math.round(box.width)));
+    const sh = Math.max(1, Math.min(pageHeight - sy, Math.round(box.height)));
 
     const prefix = `page-${String(args.pageNumber).padStart(3, "0")}-crop-${String(cropIndex).padStart(2, "0")}`;
     const imagePath = join(args.outputDir, `${prefix}.jpg`);
@@ -774,17 +1173,45 @@ async function runVisionDetector(args: {
       if (local.rejectReason) rejectReason = local.rejectReason;
     }
 
+    let boundaryScore = 0;
+    if (!rejectReason) {
+      try {
+        const boundary = await evaluateBoxBoundary({
+          cropImagePath: imagePath,
+        });
+        boundaryScore = boundary.boundaryScore;
+        if (boundary.rejectReason) {
+          rejectReason = boundary.rejectReason;
+          console.log(
+            `[vision-refine] page ${args.pageNumber} crop ${cropIndex}: rejected ${boundary.rejectReason} (boundary=${boundary.boundaryScore.toFixed(2)})`
+          );
+        }
+      } catch (err) {
+        console.error(
+          `[vision-refine] page ${args.pageNumber} crop ${cropIndex}: boundary eval failed (${err instanceof Error ? err.message : String(err)})`
+        );
+      }
+    }
+
     const visionConf = product.confidence;
     let isSearchable =
       !rejectReason &&
       qualityScore >= QUALITY_THRESHOLD &&
+      boundaryScore >= BOUNDARY_THRESHOLD &&
       visionConf >= VISION_CONFIDENCE_FLOOR;
 
     if (!rejectReason && visionConf < VISION_CONFIDENCE_FLOOR) {
       rejectReason = "low_confidence";
       isSearchable = false;
     }
+    if (!rejectReason && boundaryScore < BOUNDARY_THRESHOLD) {
+      rejectReason = "low_boundary";
+      isSearchable = false;
+    }
 
+    // MVP: boxes-only flow — no productName/category/etc. The fields stay
+    // in the schema so old rows keep rendering, but new candidates leave
+    // them undefined.
     candidates.push({
       imagePath,
       x: sx,
@@ -793,15 +1220,9 @@ async function runVisionDetector(args: {
       height: sh,
       confidence: visionConf,
       qualityScore,
+      boundaryScore,
       isSearchable,
       rejectReason,
-      productName: product.productName ?? undefined,
-      productNamePt: product.productNamePt ?? undefined,
-      category: product.category ?? undefined,
-      functionGroup: product.functionGroup ?? undefined,
-      model: product.model ?? undefined,
-      originalText: product.originalText ?? undefined,
-      descriptionPt: product.descriptionPt ?? undefined,
       sourceDetector: args.sourceDetector,
       visionConfidence: visionConf,
       rawVisionJson: product,
@@ -816,10 +1237,20 @@ async function runVisionDetector(args: {
       provider: vision.provider,
       model: vision.model,
       rawJson: vision.rawJson,
-      productsCount: vision.products.length,
+      // "productsCount" in the schema = boxesCount in the boxes-only world.
+      productsCount: vision.boxes.length,
       sourceDetector: args.sourceDetector,
     },
   };
+}
+
+function formatBox(b: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}): string {
+  return `[${Math.round(b.x)},${Math.round(b.y)} ${Math.round(b.width)}×${Math.round(b.height)}]`;
 }
 
 // ── Heuristic-quality gating ────────────────────────────────────────────────
@@ -974,6 +1405,7 @@ export async function detectProductCandidatesFromPage(args: {
   pageImagePath: string;
   outputDir: string;
   pageNumber: number;
+  pageLayout?: PdfLayoutPage;
   visionBudget?: VisionBudget;
 }): Promise<PageDetectionResult> {
   const mode = getVisionMode();
@@ -984,9 +1416,63 @@ export async function detectProductCandidatesFromPage(args: {
   const budget = args.visionBudget;
   const budgetBefore = budget?.remaining;
 
+  // Rendered page size — needed for PDF_LAYOUT geometry and the hard card rules.
+  const pageMeta = await sharp(args.pageImagePath).metadata();
+  const renderedWidth = pageMeta.width ?? 0;
+  const renderedHeight = pageMeta.height ?? 0;
+
+  // ── Tier 1: PDF_LAYOUT (PyMuPDF structure) ──────────────────────────────
+  // Primary detector. Skipped only in legacy mode=always (pure vision testing).
+  if (
+    mode !== "always" &&
+    args.pageLayout &&
+    renderedWidth > 0 &&
+    renderedHeight > 0
+  ) {
+    try {
+      const pdf = await runPdfLayoutDetector({
+        pageImagePath: args.pageImagePath,
+        outputDir: args.outputDir,
+        pageNumber: args.pageNumber,
+        pageLayout: args.pageLayout,
+        renderedWidth,
+        renderedHeight,
+      });
+      await enforceHardCardRules(pdf.candidates, renderedWidth, renderedHeight);
+      const quality = evaluatePdfLayoutQuality(pdf.candidates, args.pageLayout);
+      if (quality.good) {
+        console.log(
+          `[detector] page ${args.pageNumber}: PDF_LAYOUT accepted (${quality.reason}) → ${pdf.candidates.length} candidates, ${quality.searchableCount} searchable, no vision call`
+        );
+        return {
+          candidates: pdf.candidates,
+          pageAnalysis: pdf.pageAnalysis,
+          stats: {
+            decision: "PDF_LAYOUT",
+            visionCallsMade: 0,
+            budgetRemainingBefore: budgetBefore,
+            budgetRemainingAfter: budgetBefore,
+          },
+        };
+      }
+      console.log(
+        `[detector] page ${args.pageNumber}: PDF_LAYOUT rejected (${quality.reason}) → HEURISTIC`
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[detector] page ${args.pageNumber}: PDF_LAYOUT failed (${msg}) → HEURISTIC`
+      );
+    }
+  }
+
   // ── Mode: off, or vision not configured → heuristic-only ────────────────
   if (mode === "off" || !visionConfigured || !cheapModel) {
-    const heuristic = await runHeuristicDetector(args);
+    const heuristic = await runHeuristicWithRules(
+      args,
+      renderedWidth,
+      renderedHeight
+    );
     const searchable = heuristic.filter((c) => c.isSearchable).length;
     const reason =
       mode === "off"
@@ -1011,11 +1497,17 @@ export async function detectProductCandidatesFromPage(args: {
   let heuristicQuality: HeuristicQuality | undefined;
 
   if (mode === "auto") {
-    heuristicCandidates = await runHeuristicDetector(args);
+    heuristicCandidates = await runHeuristicWithRules(
+      args,
+      renderedWidth,
+      renderedHeight
+    );
     heuristicQuality = evaluateHeuristicQuality(heuristicCandidates);
 
     if (heuristicQuality.good) {
-      const searchable = heuristicCandidates.filter((c) => c.isSearchable).length;
+      const searchable = heuristicCandidates.filter(
+        (c) => c.isSearchable
+      ).length;
       console.log(
         `[detector] page ${args.pageNumber}: HEURISTIC accepted (searchable=${searchable}, avg=${heuristicQuality.averageQuality.toFixed(2)}), no vision call`
       );
@@ -1030,7 +1522,9 @@ export async function detectProductCandidatesFromPage(args: {
 
     // Heuristic rejected — but only escalate if budget allows.
     if (budget && budget.remaining <= 0) {
-      const searchable = heuristicCandidates.filter((c) => c.isSearchable).length;
+      const searchable = heuristicCandidates.filter(
+        (c) => c.isSearchable
+      ).length;
       console.warn(
         `[detector] page ${args.pageNumber}: HEURISTIC rejected (${heuristicQuality.reason}) but vision budget exhausted → using heuristic (${searchable} searchable)`
       );
@@ -1060,7 +1554,7 @@ export async function detectProductCandidatesFromPage(args: {
       outputDir: args.outputDir,
       pageNumber: args.pageNumber,
       model: cheapModel,
-      sourceDetector: "VISION_JSON_CHEAP",
+      sourceDetector: "VISION_BOXES_CHEAP",
     });
     const cheapSearchable = cheapResult.candidates.filter(
       (c) => c.isSearchable
@@ -1088,7 +1582,7 @@ export async function detectProductCandidatesFromPage(args: {
           outputDir: args.outputDir,
           pageNumber: args.pageNumber,
           model: premiumModel,
-          sourceDetector: "VISION_JSON_PREMIUM",
+          sourceDetector: "VISION_BOXES_PREMIUM",
         });
         const premiumSearchable = premiumResult.candidates.filter(
           (c) => c.isSearchable
@@ -1136,7 +1630,8 @@ export async function detectProductCandidatesFromPage(args: {
 
     // Fall back to the heuristic result we may already have, or compute one.
     const heuristic =
-      heuristicCandidates ?? (await runHeuristicDetector(args));
+      heuristicCandidates ??
+      (await runHeuristicWithRules(args, renderedWidth, renderedHeight));
     const searchable = heuristic.filter((c) => c.isSearchable).length;
     console.log(
       `[detector] page ${args.pageNumber}: FALLBACK → ${heuristic.length} candidates, ${searchable} searchable`

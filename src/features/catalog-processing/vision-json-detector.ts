@@ -1,16 +1,22 @@
 import { readFile } from "node:fs/promises";
-import { extname } from "node:path";
+import { extname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
+import sharp from "sharp";
 import {
+  parseVisionBoxesResponse,
   parseVisionJsonResponse,
   type PageProduct,
+  type VisionBox,
 } from "./product-json-schema";
 
-// ── Multimodal vision detector ──────────────────────────────────────────────
+// ── Multimodal vision detector (boxes-only MVP) ─────────────────────────────
 //
-// Sends a rendered catalog page to a multimodal LLM and asks it to return a
-// JSON list of products with bounding boxes. The provider is configurable via
-// env so we are not married to a single vendor — `anthropic` and `openai` are
-// implemented out of the box; new providers slot in here.
+// The MVP only needs *bounding boxes*. We ask the model for the smallest
+// JSON we can get away with, and the page is downscaled to a cheap JPEG
+// before being sent over the wire. Coordinates returned by the model are
+// in the downscaled image; the orchestrator rescales them back to the
+// original page before cropping.
 
 export class VisionDetectorUnavailableError extends Error {
   constructor(message: string) {
@@ -18,14 +24,6 @@ export class VisionDetectorUnavailableError extends Error {
     this.name = "VisionDetectorUnavailableError";
   }
 }
-
-export type VisionDetectorResult = {
-  provider: string;
-  model: string;
-  rawJson: unknown;
-  rawText: string;
-  products: PageProduct[];
-};
 
 export type VisionMode = "always" | "auto" | "off";
 
@@ -49,9 +47,10 @@ export function getPremiumVisionModel(): string | undefined {
 }
 
 export function isPremiumFallbackEnabled(): boolean {
-  return (process.env.VISION_USE_PREMIUM_FALLBACK || "")
-    .toLowerCase()
-    .trim() === "true";
+  return (
+    (process.env.VISION_USE_PREMIUM_FALLBACK || "").toLowerCase().trim() ===
+    "true"
+  );
 }
 
 export function getMaxVisionPagesPerCatalog(): number {
@@ -62,9 +61,130 @@ export function getMaxVisionPagesPerCatalog(): number {
   return n;
 }
 
-// The prompt is intentionally strict about JSON-only output so we don't need
-// to chase markdown fences (though the parser handles them anyway).
-function buildPrompt(args: {
+export function getMaxVisionImageWidth(): number {
+  const raw = process.env.VISION_DETECTOR_MAX_IMAGE_WIDTH;
+  if (!raw) return 1280;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 200) return 1280;
+  return n;
+}
+
+export function getVisionJpegQuality(): number {
+  const raw = process.env.VISION_DETECTOR_JPEG_QUALITY;
+  if (!raw) return 75;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 30 || n > 100) return 75;
+  return n;
+}
+
+export function getMaxVisionOutputTokens(): number {
+  const raw = process.env.VISION_DETECTOR_MAX_OUTPUT_TOKENS;
+  if (!raw) return 800;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 100) return 800;
+  return n;
+}
+
+// ── prepareVisionInputImage ─────────────────────────────────────────────────
+//
+// Generates a temporary JPEG (max width, quality from env) and reports the
+// scale factors so the caller can map model coordinates back to the
+// original page coordinates.
+//
+// IMPORTANT: the downscaled image is for the model only. Cropping must
+// always be done on the original full-resolution page.
+
+export type PreparedVisionImage = {
+  imagePath: string;
+  width: number;
+  height: number;
+  scaleX: number; // multiply downscaled X by scaleX → original X
+  scaleY: number;
+};
+
+export async function prepareVisionInputImage(args: {
+  pageImagePath: string;
+  maxWidth?: number;
+  jpegQuality?: number;
+}): Promise<PreparedVisionImage> {
+  const maxWidth = args.maxWidth ?? getMaxVisionImageWidth();
+  const jpegQuality = args.jpegQuality ?? getVisionJpegQuality();
+
+  const meta = await sharp(args.pageImagePath).metadata();
+  const origW = meta.width ?? 0;
+  const origH = meta.height ?? 0;
+  if (origW === 0 || origH === 0) {
+    throw new Error(
+      `prepareVisionInputImage: invalid source image ${args.pageImagePath}`
+    );
+  }
+
+  const targetW = Math.min(origW, maxWidth);
+  const scale = targetW / origW;
+  const targetH = Math.max(1, Math.round(origH * scale));
+
+  const outPath = join(tmpdir(), `vision-input-${randomUUID()}.jpg`);
+  await sharp(args.pageImagePath)
+    .resize(targetW, targetH, { fit: "fill" })
+    .flatten({ background: { r: 255, g: 255, b: 255 } })
+    .jpeg({ quality: jpegQuality, mozjpeg: true })
+    .toFile(outPath);
+
+  return {
+    imagePath: outPath,
+    width: targetW,
+    height: targetH,
+    scaleX: origW / targetW,
+    scaleY: origH / targetH,
+  };
+}
+
+// ── Prompts ─────────────────────────────────────────────────────────────────
+//
+// Boxes-only prompt — short, no metadata, no translation, no classification.
+
+function buildBoxesPrompt(args: {
+  pageNumber: number;
+  pageWidth: number;
+  pageHeight: number;
+}): string {
+  return `Você está analisando uma página renderizada de um catálogo de fornecedor.
+
+A imagem tem ${args.pageWidth} pixels de largura e ${args.pageHeight} pixels de altura.
+Página: ${args.pageNumber}.
+
+Sua tarefa é detectar os cards/produtos vendidos nesta página.
+
+Retorne SOMENTE JSON válido, sem markdown e sem explicação:
+
+{
+  "pageNumber": ${args.pageNumber},
+  "boxes": [
+    { "x": number, "y": number, "width": number, "height": number, "confidence": number }
+  ]
+}
+
+Regras:
+- Cada produto/card comercial deve virar uma box separada.
+- Não junte vários produtos na mesma box se eles aparecem separados.
+- Ignore cabeçalho, rodapé, logo do catálogo, número da página, faixas decorativas e espaços vazios.
+- Se a página tiver uma grade 3x3, retorne 9 boxes.
+- Se tiver 2 produtos, retorne 2 boxes.
+- Se a página não tiver produtos, retorne "boxes": [].
+- A box deve cobrir o card/produto completo o suficiente para busca visual.
+- Não tente descrever o produto.
+- Não extraia texto.
+- Não classifique categoria.
+- Não traduza nada.
+- As coordenadas devem estar em pixels da imagem recebida.
+- Confidence deve estar entre 0 e 1.
+
+Responda apenas com JSON.`;
+}
+
+// Legacy rich-metadata prompt — kept only as long as the deprecated function
+// below exists. Not used by the MVP pipeline.
+function buildLegacyRichPrompt(args: {
   pageNumber: number;
   pageWidth: number;
   pageHeight: number;
@@ -76,37 +196,17 @@ Esta é a página número ${args.pageNumber} do catálogo.
 
 Sua tarefa é identificar TODOS os produtos comerciais vendidos nesta página.
 
-Retorne SOMENTE JSON válido, sem markdown, sem explicação, no formato exato:
+Retorne SOMENTE JSON válido, sem markdown, sem explicação.
 
 {
   "pageNumber": ${args.pageNumber},
   "products": [
     {
       "box": { "x": number, "y": number, "width": number, "height": number },
-      "productName": string | null,
-      "productNamePt": string | null,
-      "category": string | null,
-      "functionGroup": string | null,
-      "model": string | null,
-      "originalText": string | null,
-      "descriptionPt": string | null,
       "confidence": number
     }
   ]
 }
-
-Regras:
-- Cada card/produto vendido vira um item separado.
-- Não junte múltiplos produtos em um único box se aparecem como cards separados.
-- Ignore cabeçalho, rodapé, número da página, título de seção, logo do catálogo, faixas decorativas, tabela vazia e espaços em branco.
-- Se a página tiver grade 3x3 de produtos, retorne 9 produtos.
-- Se a página for capa, sumário ou não tiver produtos, retorne products: [].
-- O box deve estar em PIXELS relativos à imagem inteira (não normalize para 0-1).
-- O box deve cobrir o card/produto inteiro: imagem do produto, embalagem e texto principal.
-- Não tente isolar apenas o objeto físico. O card completo é aceitável.
-- productNamePt e descriptionPt devem estar em português quando possível.
-- functionGroup é a função comercial em snake_case: carregador, cabo_usb, hub_usb, antena_tv, suporte_tv, barbeador_eletrico, fone_bluetooth, controle_game, mouse, teclado, ring_light, lanterna, umidificador, microfone, adaptador, ferramenta_eletrica, desconhecido.
-- confidence deve estar entre 0 e 1.
 
 Responda APENAS com o objeto JSON, nada mais.`;
 }
@@ -131,6 +231,15 @@ async function fetchWithTimeout(
   }
 }
 
+type ProviderCallResult = {
+  text: string;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+};
+
 // ── Provider: Anthropic ─────────────────────────────────────────────────────
 
 async function callAnthropic(args: {
@@ -139,7 +248,8 @@ async function callAnthropic(args: {
   imageBase64: string;
   mediaType: "image/jpeg" | "image/png";
   prompt: string;
-}): Promise<string> {
+  maxTokens: number;
+}): Promise<ProviderCallResult> {
   const res = await fetchWithTimeout(
     "https://api.anthropic.com/v1/messages",
     {
@@ -151,7 +261,7 @@ async function callAnthropic(args: {
       },
       body: JSON.stringify({
         model: args.model,
-        max_tokens: 4096,
+        max_tokens: args.maxTokens,
         messages: [
           {
             role: "user",
@@ -179,12 +289,25 @@ async function callAnthropic(args: {
   }
   const json = (await res.json()) as {
     content?: Array<{ type: string; text?: string }>;
+    usage?: { input_tokens?: number; output_tokens?: number };
   };
   const textBlock = json.content?.find((c) => c.type === "text" && c.text);
   if (!textBlock?.text) {
     throw new Error("Anthropic response had no text block");
   }
-  return textBlock.text;
+  const inputTokens = json.usage?.input_tokens;
+  const outputTokens = json.usage?.output_tokens;
+  return {
+    text: textBlock.text,
+    usage: {
+      inputTokens,
+      outputTokens,
+      totalTokens:
+        inputTokens != null && outputTokens != null
+          ? inputTokens + outputTokens
+          : undefined,
+    },
+  };
 }
 
 // ── Provider: OpenAI ────────────────────────────────────────────────────────
@@ -195,7 +318,8 @@ async function callOpenAI(args: {
   imageBase64: string;
   mediaType: "image/jpeg" | "image/png";
   prompt: string;
-}): Promise<string> {
+  maxTokens: number;
+}): Promise<ProviderCallResult> {
   const dataUrl = `data:${args.mediaType};base64,${args.imageBase64}`;
   const res = await fetchWithTimeout(
     "https://api.openai.com/v1/chat/completions",
@@ -207,7 +331,7 @@ async function callOpenAI(args: {
       },
       body: JSON.stringify({
         model: args.model,
-        // Ask for JSON object output if the chosen model supports it.
+        max_tokens: args.maxTokens,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -229,12 +353,24 @@ async function callOpenAI(args: {
   }
   const json = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
   };
   const text = json.choices?.[0]?.message?.content;
   if (!text) {
     throw new Error("OpenAI response had no content");
   }
-  return text;
+  return {
+    text,
+    usage: {
+      inputTokens: json.usage?.prompt_tokens,
+      outputTokens: json.usage?.completion_tokens,
+      totalTokens: json.usage?.total_tokens,
+    },
+  };
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
@@ -249,17 +385,15 @@ export function isVisionDetectorConfigured(): boolean {
   );
 }
 
-export async function detectProductsJsonWithVision(args: {
-  pageImagePath: string;
-  pageNumber: number;
-  pageWidth: number;
-  pageHeight: number;
-  modelOverride?: string;
-}): Promise<VisionDetectorResult> {
+function resolveProviderAndModel(modelOverride?: string): {
+  provider: "anthropic" | "openai";
+  apiKey: string;
+  model: string;
+} {
   const provider = process.env.VISION_DETECTOR_PROVIDER?.toLowerCase();
   const apiKey = process.env.VISION_DETECTOR_API_KEY;
   const model =
-    args.modelOverride ||
+    modelOverride ||
     process.env.VISION_DETECTOR_MODEL_CHEAP ||
     process.env.VISION_DETECTOR_MODEL;
 
@@ -268,35 +402,175 @@ export async function detectProductsJsonWithVision(args: {
       "VISION_DETECTOR_PROVIDER, VISION_DETECTOR_API_KEY and a model (VISION_DETECTOR_MODEL_CHEAP/PREMIUM or VISION_DETECTOR_MODEL) must all be set"
     );
   }
+  if (provider !== "anthropic" && provider !== "openai") {
+    throw new VisionDetectorUnavailableError(
+      `Unsupported VISION_DETECTOR_PROVIDER: ${provider} (supported: anthropic, openai)`
+    );
+  }
+  return { provider, apiKey, model };
+}
+
+async function callProvider(args: {
+  provider: "anthropic" | "openai";
+  apiKey: string;
+  model: string;
+  imageBase64: string;
+  mediaType: "image/jpeg" | "image/png";
+  prompt: string;
+  maxTokens: number;
+}): Promise<ProviderCallResult> {
+  if (args.provider === "anthropic") {
+    return callAnthropic({
+      apiKey: args.apiKey,
+      model: args.model,
+      imageBase64: args.imageBase64,
+      mediaType: args.mediaType,
+      prompt: args.prompt,
+      maxTokens: args.maxTokens,
+    });
+  }
+  return callOpenAI({
+    apiKey: args.apiKey,
+    model: args.model,
+    imageBase64: args.imageBase64,
+    mediaType: args.mediaType,
+    prompt: args.prompt,
+    maxTokens: args.maxTokens,
+  });
+}
+
+function logUsage(args: {
+  provider: string;
+  model: string;
+  pageNumber: number;
+  usage?: ProviderCallResult["usage"];
+}) {
+  if (!args.usage) return;
+  const { inputTokens, outputTokens, totalTokens } = args.usage;
+  console.log(
+    `[vision-tokens] page ${args.pageNumber} provider=${args.provider} model=${args.model} input=${inputTokens ?? "?"} output=${outputTokens ?? "?"} total=${totalTokens ?? "?"}`
+  );
+}
+
+// ── Boxes-only detector (MVP) ───────────────────────────────────────────────
+
+export type VisionBoxesResult = {
+  provider: string;
+  model: string;
+  rawJson: unknown;
+  rawText: string;
+  boxes: VisionBox[];
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+};
+
+/**
+ * Sends a (downscaled) page to the multimodal model and asks for bounding
+ * boxes only. Returns boxes in *image-input* coordinates — the caller is
+ * responsible for scaling them back to the original page.
+ */
+export async function detectProductBoxesWithVision(args: {
+  pageImagePath: string; // path to the image you actually send to the model
+  pageNumber: number;
+  pageWidth: number; // width of the image you send to the model
+  pageHeight: number; // height of the image you send to the model
+  modelOverride?: string;
+}): Promise<VisionBoxesResult> {
+  const { provider, apiKey, model } = resolveProviderAndModel(args.modelOverride);
 
   const imageBuffer = await readFile(args.pageImagePath);
   const imageBase64 = imageBuffer.toString("base64");
   const mediaType = mediaTypeFromPath(args.pageImagePath);
+  const maxTokens = getMaxVisionOutputTokens();
 
-  const prompt = buildPrompt({
+  const prompt = buildBoxesPrompt({
     pageNumber: args.pageNumber,
     pageWidth: args.pageWidth,
     pageHeight: args.pageHeight,
   });
 
-  let rawText: string;
-  if (provider === "anthropic") {
-    rawText = await callAnthropic({ apiKey, model, imageBase64, mediaType, prompt });
-  } else if (provider === "openai") {
-    rawText = await callOpenAI({ apiKey, model, imageBase64, mediaType, prompt });
-  } else {
-    throw new VisionDetectorUnavailableError(
-      `Unsupported VISION_DETECTOR_PROVIDER: ${provider} (supported: anthropic, openai)`
-    );
-  }
+  const { text, usage } = await callProvider({
+    provider,
+    apiKey,
+    model,
+    imageBase64,
+    mediaType,
+    prompt,
+    maxTokens,
+  });
 
-  const parsed = parseVisionJsonResponse(rawText);
+  logUsage({ provider, model, pageNumber: args.pageNumber, usage });
+
+  const parsed = parseVisionBoxesResponse(text);
 
   return {
     provider,
     model,
     rawJson: parsed,
-    rawText,
+    rawText: text,
+    boxes: parsed.boxes,
+    usage,
+  };
+}
+
+// ── Legacy rich-metadata detector (deprecated) ──────────────────────────────
+//
+// Kept temporarily so existing callers still compile. New code should use
+// `detectProductBoxesWithVision`. This function still hits the API and
+// returns product[].box; it just uses a shorter prompt to avoid the old
+// expensive rich-metadata response.
+
+export type VisionDetectorResult = {
+  provider: string;
+  model: string;
+  rawJson: unknown;
+  rawText: string;
+  products: PageProduct[];
+};
+
+/** @deprecated Use `detectProductBoxesWithVision`. */
+export async function detectProductsJsonWithVision(args: {
+  pageImagePath: string;
+  pageNumber: number;
+  pageWidth: number;
+  pageHeight: number;
+  modelOverride?: string;
+}): Promise<VisionDetectorResult> {
+  const { provider, apiKey, model } = resolveProviderAndModel(args.modelOverride);
+
+  const imageBuffer = await readFile(args.pageImagePath);
+  const imageBase64 = imageBuffer.toString("base64");
+  const mediaType = mediaTypeFromPath(args.pageImagePath);
+  const maxTokens = getMaxVisionOutputTokens();
+
+  const prompt = buildLegacyRichPrompt({
+    pageNumber: args.pageNumber,
+    pageWidth: args.pageWidth,
+    pageHeight: args.pageHeight,
+  });
+
+  const { text, usage } = await callProvider({
+    provider,
+    apiKey,
+    model,
+    imageBase64,
+    mediaType,
+    prompt,
+    maxTokens,
+  });
+
+  logUsage({ provider, model, pageNumber: args.pageNumber, usage });
+
+  const parsed = parseVisionJsonResponse(text);
+
+  return {
+    provider,
+    model,
+    rawJson: parsed,
+    rawText: text,
     products: parsed.products,
   };
 }

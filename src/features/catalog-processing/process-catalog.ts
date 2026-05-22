@@ -11,6 +11,7 @@ import {
   detectProductCandidatesFromPage,
   type DetectionDecision,
 } from "./detect-product-candidates";
+import { extractPdfLayout, type PdfLayoutPage } from "./pdf-layout-extractor";
 import {
   getMaxVisionPagesPerCatalog,
   getVisionMode,
@@ -30,10 +31,15 @@ export async function processCatalog(
     const pdfStoragePath = `${catalogId}/original/catalog.pdf`;
     const { error: pdfUploadError } = await supabaseAdmin.storage
       .from("product-images")
-      .upload(pdfStoragePath, pdfBuffer, { contentType: "application/pdf", upsert: true });
+      .upload(pdfStoragePath, pdfBuffer, {
+        contentType: "application/pdf",
+        upsert: true,
+      });
 
     if (pdfUploadError) {
-      console.warn(`Aviso: não foi possível salvar PDF original: ${pdfUploadError.message}`);
+      console.warn(
+        `Aviso: não foi possível salvar PDF original: ${pdfUploadError.message}`
+      );
     } else {
       await prisma.catalog.update({
         where: { id: catalogId },
@@ -43,6 +49,24 @@ export async function processCatalog(
 
     const renderedPages = await renderPdfPagesToImages(pdfPath, pagesDir);
 
+    // ── Extract the PDF's real structure once (primary detector input) ──────
+    // PyMuPDF gives us text/image/drawing positions per page so the layout
+    // detector can group them into product cards without calling an LLM.
+    // Best-effort: a null result just means every page falls back to the
+    // heuristic / vision cascade.
+    const layout = await extractPdfLayout({ pdfPath, outputDir: baseDir });
+    const layoutByPage = new Map<number, PdfLayoutPage>();
+    if (layout) {
+      for (const page of layout.pages) layoutByPage.set(page.pageNumber, page);
+      console.log(
+        `[catalog ${catalogId}] pdf-layout: ${layout.pages.length} pages extracted`
+      );
+    } else {
+      console.warn(
+        `[catalog ${catalogId}] pdf-layout unavailable → heuristic/vision only`
+      );
+    }
+
     let pageCount = 0;
     let candidateCount = 0;
 
@@ -51,6 +75,7 @@ export async function processCatalog(
     const visionBudget = { remaining: maxVisionPages };
     const visionMode = getVisionMode();
     const decisionCounts: Record<DetectionDecision, number> = {
+      PDF_LAYOUT: 0,
       HEURISTIC: 0,
       VISION_CHEAP: 0,
       VISION_PREMIUM: 0,
@@ -96,6 +121,7 @@ export async function processCatalog(
             pageImagePath: imagePath,
             outputDir: candidatesDir,
             pageNumber,
+            pageLayout: layoutByPage.get(pageNumber),
             visionBudget,
           });
 
@@ -138,7 +164,10 @@ export async function processCatalog(
 
             const candidateIndex = candidateCount + 1;
             const cropStoragePath = `${catalogId}/candidates/candidate-${String(candidateIndex).padStart(4, "0")}.jpg`;
-            const cropUrl = await uploadImageToStorage(cropStoragePath, cropBuffer);
+            const cropUrl = await uploadImageToStorage(
+              cropStoragePath,
+              cropBuffer
+            );
 
             // Upload card image if the detector provided a separate one.
             // MVP: detector emits one card-shaped crop per product and leaves
@@ -148,7 +177,10 @@ export async function processCatalog(
               try {
                 const cardBuffer = await readFile(candidate.cardImagePath);
                 const cardStoragePath = `${catalogId}/candidates/card-${String(candidateIndex).padStart(4, "0")}.jpg`;
-                cardUrl = await uploadImageToStorage(cardStoragePath, cardBuffer);
+                cardUrl = await uploadImageToStorage(
+                  cardStoragePath,
+                  cardBuffer
+                );
               } catch {
                 // Card image is optional — ignore failure
               }
@@ -192,7 +224,9 @@ export async function processCatalog(
             // Only generate embedding for searchable crops with sufficient quality.
             // The gate matches detect-product-candidates' QUALITY_THRESHOLD (0.60).
             if (candidate.isSearchable && candidate.qualityScore >= 0.6) {
-              const embedding = await generateImageEmbeddingFromPath(candidate.imagePath);
+              const embedding = await generateImageEmbeddingFromPath(
+                candidate.imagePath
+              );
               const vectorStr = `[${embedding.join(",")}]`;
               await prisma.$executeRaw`
                 UPDATE "ProductCandidate"
@@ -203,7 +237,10 @@ export async function processCatalog(
 
             candidateCount++;
           } catch (err) {
-            console.error(`Erro ao processar candidato (pág. ${pageNumber}):`, err);
+            console.error(
+              `Erro ao processar candidato (pág. ${pageNumber}):`,
+              err
+            );
           }
         }
       } catch (err) {
@@ -212,7 +249,7 @@ export async function processCatalog(
     }
 
     console.log(
-      `[catalog ${catalogId}] summary: totalPages=${pageCount} heuristicPages=${decisionCounts.HEURISTIC} visionCheapPages=${decisionCounts.VISION_CHEAP} visionPremiumPages=${decisionCounts.VISION_PREMIUM} fallbackPages=${decisionCounts.FALLBACK} budgetExceededPages=${decisionCounts.BUDGET_EXCEEDED} visionOffPages=${decisionCounts.VISION_OFF} estimatedVisionCalls=${totalVisionCalls} budgetRemaining=${visionBudget.remaining}/${maxVisionPages} modelsUsed=${[...modelsUsed].join(",") || "none"}`
+      `[catalog ${catalogId}] summary: totalPages=${pageCount} pdfLayoutPages=${decisionCounts.PDF_LAYOUT} heuristicPages=${decisionCounts.HEURISTIC} visionCheapPages=${decisionCounts.VISION_CHEAP} visionPremiumPages=${decisionCounts.VISION_PREMIUM} fallbackPages=${decisionCounts.FALLBACK} budgetExceededPages=${decisionCounts.BUDGET_EXCEEDED} visionOffPages=${decisionCounts.VISION_OFF} estimatedVisionCalls=${totalVisionCalls} budgetRemaining=${visionBudget.remaining}/${maxVisionPages} modelsUsed=${[...modelsUsed].join(",") || "none"}`
     );
 
     await prisma.catalog.update({

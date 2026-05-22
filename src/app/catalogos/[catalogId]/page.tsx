@@ -45,14 +45,33 @@ const rejectLabel: Record<string, string> = {
   invalid_json: "JSON inválido",
   duplicate: "duplicado",
   low_confidence: "confiança baixa",
+  bad_card_boundary: "borda contaminada",
+  low_boundary: "borda fraca",
+  multi_card_crop: "vários cards",
   no_products_detected: "sem produtos detectados",
   fallback_used: "fallback heurístico",
 };
 
 const detectorLabel: Record<string, string> = {
-  VISION_JSON: "vision JSON",
+  PDF_LAYOUT: "pdf layout",
+  VISION_JSON: "vision (legado)",
+  VISION_JSON_CHEAP: "vision JSON (legado)",
+  VISION_JSON_PREMIUM: "vision JSON premium (legado)",
+  VISION_BOXES_CHEAP: "vision boxes",
+  VISION_BOXES_PREMIUM: "vision premium",
   HEURISTIC: "heurístico",
-  FALLBACK: "fallback heurístico",
+  FALLBACK: "fallback",
+};
+
+const detectorBadgeClass: Record<string, string> = {
+  PDF_LAYOUT: "bg-emerald-100 text-emerald-700",
+  VISION_JSON: "bg-blue-100 text-blue-700",
+  VISION_JSON_CHEAP: "bg-blue-100 text-blue-700",
+  VISION_JSON_PREMIUM: "bg-blue-100 text-blue-700",
+  VISION_BOXES_CHEAP: "bg-indigo-100 text-indigo-700",
+  VISION_BOXES_PREMIUM: "bg-purple-100 text-purple-700",
+  HEURISTIC: "bg-amber-100 text-amber-700",
+  FALLBACK: "bg-orange-100 text-orange-700",
 };
 
 export default async function CatalogPage({ params }: Props) {
@@ -63,7 +82,13 @@ export default async function CatalogPage({ params }: Props) {
     include: {
       supplier: { select: { id: true, name: true } },
       pages: {
-        select: { id: true, imageUrl: true, pageNumber: true, width: true, height: true },
+        select: {
+          id: true,
+          imageUrl: true,
+          pageNumber: true,
+          width: true,
+          height: true,
+        },
         orderBy: { pageNumber: "asc" },
       },
       candidates: {
@@ -101,7 +126,9 @@ export default async function CatalogPage({ params }: Props) {
 
   if (!catalog) notFound();
 
-  const searchableCount = catalog.candidates.filter((c) => c.isSearchable).length;
+  const searchableCount = catalog.candidates.filter(
+    (c) => c.isSearchable
+  ).length;
   const debugCount = catalog.candidates.length - searchableCount;
 
   return (
@@ -110,10 +137,15 @@ export default async function CatalogPage({ params }: Props) {
 
       {/* Breadcrumb + title */}
       <div className="flex flex-col gap-1">
-        <p className="text-sm text-muted-foreground">
-          <Link href="/fornecedores" className="hover:underline">Fornecedores</Link>
+        <p className="text-muted-foreground text-sm">
+          <Link href="/fornecedores" className="hover:underline">
+            Fornecedores
+          </Link>
           {" / "}
-          <Link href={`/fornecedores/${catalog.supplier.id}`} className="hover:underline">
+          <Link
+            href={`/fornecedores/${catalog.supplier.id}`}
+            className="hover:underline"
+          >
             {catalog.supplier.name}
           </Link>
           {" / "}
@@ -140,38 +172,53 @@ export default async function CatalogPage({ params }: Props) {
       </div>
 
       {catalog.error && (
-        <p className="rounded bg-destructive/10 p-3 text-sm text-destructive">
+        <p className="bg-destructive/10 text-destructive rounded p-3 text-sm">
           Erro: {catalog.error}
         </p>
       )}
 
       {/* Stats */}
-      <div className="flex flex-wrap gap-6 text-sm text-muted-foreground">
+      <div className="text-muted-foreground flex flex-wrap gap-6 text-sm">
         <span>
-          Fornecedor: <strong className="text-foreground">{catalog.supplier.name}</strong>
+          Fornecedor:{" "}
+          <strong className="text-foreground">{catalog.supplier.name}</strong>
         </span>
         {catalog.pageCount != null && (
-          <span>Páginas: <strong className="text-foreground">{catalog.pageCount}</strong></span>
+          <span>
+            Páginas:{" "}
+            <strong className="text-foreground">{catalog.pageCount}</strong>
+          </span>
         )}
         {catalog.candidateCount != null && (
           <span>
-            Candidatos: <strong className="text-foreground">{catalog.candidateCount}</strong>
+            Candidatos:{" "}
+            <strong className="text-foreground">
+              {catalog.candidateCount}
+            </strong>
             {" · "}
-            <span className="text-green-600 font-medium">{searchableCount} pesquisáveis</span>
+            <span className="font-medium text-green-600">
+              {searchableCount} pesquisáveis
+            </span>
             {debugCount > 0 && (
-              <span className="text-muted-foreground"> · {debugCount} debug</span>
+              <span className="text-muted-foreground">
+                {" "}
+                · {debugCount} debug
+              </span>
             )}
           </span>
         )}
         {!catalog.pdfStoragePath && catalog.status === "READY" && (
-          <span className="text-amber-600 text-xs">
-            ⚠ PDF original não salvo — reprocessamento requer reenvio do arquivo.
+          <span className="text-xs text-amber-600">
+            ⚠ PDF original não salvo — reprocessamento requer reenvio do
+            arquivo.
           </span>
         )}
       </div>
 
       {catalog.status === "PROCESSING" && (
-        <p className="text-muted-foreground">Processando catálogo, aguarde...</p>
+        <p className="text-muted-foreground">
+          Processando catálogo, aguarde...
+        </p>
       )}
 
       {catalog.status === "READY" && (
@@ -189,7 +236,7 @@ export default async function CatalogPage({ params }: Props) {
                     href={page.imageUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="overflow-hidden rounded-md border bg-muted transition-opacity hover:opacity-90"
+                    className="bg-muted overflow-hidden rounded-md border transition-opacity hover:opacity-90"
                   >
                     <div className="relative aspect-[3/4]">
                       <Image
@@ -200,7 +247,7 @@ export default async function CatalogPage({ params }: Props) {
                         sizes="(max-width: 640px) 50vw, 20vw"
                       />
                     </div>
-                    <p className="border-t px-2 py-1 text-center text-xs text-muted-foreground">
+                    <p className="text-muted-foreground border-t px-2 py-1 text-center text-xs">
                       Pág. {page.pageNumber}
                     </p>
                   </a>
@@ -215,16 +262,22 @@ export default async function CatalogPage({ params }: Props) {
             const rejected = catalog.candidates.filter((c) => !c.isSearchable);
 
             const renderCard = (c: (typeof catalog.candidates)[number]) => {
-              const displayName = c.productNamePt ?? c.productName ?? c.detectedLabel;
+              const displayName =
+                c.productNamePt ?? c.productName ?? c.detectedLabel;
               return (
                 <div
                   key={c.id}
-                  className={`overflow-hidden rounded-lg border bg-card ${
+                  className={`bg-card overflow-hidden rounded-lg border ${
                     c.isSearchable ? "border-green-500/40" : "opacity-70"
                   }`}
                 >
-                  <a href={c.cropUrl} target="_blank" rel="noopener noreferrer" className="block">
-                    <div className="relative aspect-square bg-muted">
+                  <a
+                    href={c.cropUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block"
+                  >
+                    <div className="bg-muted relative aspect-square">
                       <Image
                         src={c.cropUrl}
                         alt={displayName ?? "Candidato"}
@@ -234,23 +287,22 @@ export default async function CatalogPage({ params }: Props) {
                       />
                     </div>
                   </a>
-                  <div className="border-t p-2 flex flex-col gap-1 text-xs">
+                  <div className="flex flex-col gap-1 border-t p-2 text-xs">
                     <div className="flex flex-wrap gap-1">
                       {c.isSearchable ? (
-                        <span className="rounded bg-green-100 px-1.5 py-0.5 text-green-700 font-medium">
+                        <span className="rounded bg-green-100 px-1.5 py-0.5 font-medium text-green-700">
                           Busca: SIM
                         </span>
                       ) : (
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-muted-foreground font-medium">
+                        <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-medium">
                           Debug
                         </span>
                       )}
                       {c.sourceDetector && (
                         <span
                           className={`rounded px-1.5 py-0.5 font-medium ${
-                            c.sourceDetector === "VISION_JSON"
-                              ? "bg-blue-100 text-blue-700"
-                              : "bg-amber-100 text-amber-700"
+                            detectorBadgeClass[c.sourceDetector] ??
+                            "bg-muted text-muted-foreground"
                           }`}
                           title={c.sourceDetector}
                         >
@@ -258,40 +310,49 @@ export default async function CatalogPage({ params }: Props) {
                         </span>
                       )}
                       {c.rejectReason && (
-                        <span className="rounded bg-destructive/10 px-1.5 py-0.5 text-destructive">
+                        <span className="bg-destructive/10 text-destructive rounded px-1.5 py-0.5">
                           {rejectLabel[c.rejectReason] ?? c.rejectReason}
                         </span>
                       )}
                     </div>
 
                     {displayName && (
-                      <p className="font-medium leading-tight" title={displayName}>
+                      <p
+                        className="leading-tight font-medium"
+                        title={displayName}
+                      >
                         {displayName}
                       </p>
                     )}
                     {(c.category || c.functionGroup) && (
                       <p className="text-muted-foreground truncate">
-                        {[c.category, c.functionGroup].filter(Boolean).join(" · ")}
+                        {[c.category, c.functionGroup]
+                          .filter(Boolean)
+                          .join(" · ")}
                       </p>
                     )}
                     {c.model && (
-                      <p className="text-muted-foreground truncate">Modelo: {c.model}</p>
+                      <p className="text-muted-foreground truncate">
+                        Modelo: {c.model}
+                      </p>
                     )}
                     {c.descriptionPt && (
                       <p
-                        className="line-clamp-2 text-muted-foreground"
+                        className="text-muted-foreground line-clamp-2"
                         title={c.descriptionPt}
                       >
                         {c.descriptionPt}
                       </p>
                     )}
 
-                    <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-muted-foreground">
+                    <div className="text-muted-foreground flex flex-wrap gap-x-2 gap-y-0.5">
                       {c.qualityScore != null && (
                         <span>qual. {Math.round(c.qualityScore * 100)}%</span>
                       )}
                       {c.visionConfidence != null && (
-                        <span>vision {Math.round(c.visionConfidence * 100)}%</span>
+                        <span>
+                          vision {Math.round(c.visionConfidence * 100)}%
+                        </span>
                       )}
                       {c.confidence != null && c.visionConfidence == null && (
                         <span>conf. {Math.round(c.confidence * 100)}%</span>
@@ -305,12 +366,12 @@ export default async function CatalogPage({ params }: Props) {
                       {c.sourceType.toLowerCase().replace("_", " ")}
                     </p>
 
-                    <div className="flex flex-col gap-0.5 mt-0.5">
+                    <div className="mt-0.5 flex flex-col gap-0.5">
                       <a
                         href={c.originalUrl}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="underline-offset-2 hover:underline text-muted-foreground"
+                        className="text-muted-foreground underline-offset-2 hover:underline"
                       >
                         Página original
                       </a>
@@ -319,7 +380,7 @@ export default async function CatalogPage({ params }: Props) {
                           href={c.cardUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="underline-offset-2 hover:underline text-muted-foreground"
+                          className="text-muted-foreground underline-offset-2 hover:underline"
                         >
                           Card completo
                         </a>
@@ -333,8 +394,10 @@ export default async function CatalogPage({ params }: Props) {
             if (catalog.candidates.length === 0) {
               return (
                 <section className="flex flex-col gap-3">
-                  <h2 className="text-xl font-semibold">Candidatos extraídos (0)</h2>
-                  <p className="py-8 text-center text-muted-foreground">
+                  <h2 className="text-xl font-semibold">
+                    Candidatos extraídos (0)
+                  </h2>
+                  <p className="text-muted-foreground py-8 text-center">
                     Nenhum candidato detectado. Tente reprocessar.
                   </p>
                 </section>

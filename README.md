@@ -7,14 +7,19 @@ Sistema interno de busca visual por produto. Rafael sobe catálogos em PDF de fo
 ```
 PDF
 → pdftoppm -jpeg -r 180        (renderiza páginas inteiras a 180 DPI)
+→ extractPdfLayout (PyMuPDF)   (extrai a estrutura real do PDF: textos, imagens, desenhos)
 → CatalogPage salvo no Supabase Storage em {catalogId}/pages/
-→ detectProductCandidatesFromPage (heurística de crop por bounding box)
+→ detectProductCandidatesFromPage — cascata PDF_LAYOUT → HEURISTIC → VISION → FALLBACK
 → ProductCandidate salvo em {catalogId}/candidates/
 → DINOv2 embedding (Xenova/dinov2-base, 768 dim, CLS token)
 → pgvector cosine search sobre ProductCandidate
 ```
 
-> `pdfimages` não é mais a pipeline principal. Era usado para extrair imagens embutidas do PDF (que frequentemente contêm cards inteiros com logo, texto e foto de ambiente, não o produto isolado). O novo fluxo renderiza cada página como imagem e aplica detecção de regiões de conteúdo.
+> **PDF_LAYOUT é a pipeline principal.** Em vez de confiar num LLM ou numa
+> heurística de pixels para recortar, usamos a estrutura real do PDF (PyMuPDF):
+> agrupamos imagens + textos próximos em cards de produto. A IA multimodal virou
+> *fallback* — só roda em páginas escaneadas ou sem estrutura. `pdfimages`
+> permanece apenas como artefato legado, não é usado na busca.
 
 ## Variáveis de ambiente
 
@@ -26,19 +31,31 @@ SUPABASE_ANON_KEY
 SUPABASE_SERVICE_ROLE_KEY # necessário para upload server-side
 
 # Detector visual (cascata — opcional)
-VISION_DETECTOR_PROVIDER       # 'openai' | 'anthropic'
+VISION_DETECTOR_PROVIDER          # 'openai' | 'anthropic'
 VISION_DETECTOR_API_KEY
-VISION_DETECTOR_MODE           # 'auto' (default) | 'always' | 'off'
-VISION_DETECTOR_MODEL_CHEAP    # modelo barato (chamado primeiro)
-VISION_DETECTOR_MODEL_PREMIUM  # modelo caro (só com fallback ligado)
-VISION_USE_PREMIUM_FALLBACK    # 'true' | 'false' (default false)
-CATALOG_MAX_VISION_PAGES       # teto de chamadas com visão por catálogo (default 20)
+VISION_DETECTOR_MODE              # 'auto' (default) | 'always' | 'off'
+VISION_DETECTOR_MODEL_CHEAP       # modelo barato (chamado primeiro)
+VISION_DETECTOR_MODEL_PREMIUM     # modelo caro (só com fallback ligado)
+VISION_USE_PREMIUM_FALLBACK       # 'true' | 'false' (default false)
+CATALOG_MAX_VISION_PAGES          # teto de chamadas com visão por catálogo (default 20)
+
+# Knobs de custo do detector boxes-only
+VISION_DETECTOR_MAX_IMAGE_WIDTH   # default 1280 — largura máx da imagem enviada
+VISION_DETECTOR_JPEG_QUALITY      # default 75
+VISION_DETECTOR_MAX_OUTPUT_TOKENS # default 800 — boxes-only não precisa de mais
+
+# Detector PDF_LAYOUT (PyMuPDF)
+PYTHON_BIN                        # interpretador python do extrator (default 'python3')
 ```
 
 ### Pipeline de detecção em cascata
 
-`auto` (padrão) só chama o modelo de visão quando a heurística local falha
-(poucos produtos, crops anormais, qualidade média baixa). Em testes use o
+A ordem é **`PDF_LAYOUT → HEURISTIC → VISION_BOXES_CHEAP → VISION_BOXES_PREMIUM → FALLBACK`**.
+O detector primário (`PDF_LAYOUT`) usa a estrutura real do PDF via PyMuPDF e não
+custa nada. Numa página digital típica ele resolve sozinho e a IA nem é chamada.
+
+`auto` (padrão) só chama o modelo de visão quando **PDF_LAYOUT e a heurística**
+falham (página escaneada, sem estrutura, crops anormais). Em testes use o
 modelo barato e mantenha `VISION_USE_PREMIUM_FALLBACK=false`. O premium só
 deve ser ligado para resgatar páginas específicas — nunca em catálogo
 inteiro sem limite.
@@ -61,6 +78,11 @@ CATALOG_MAX_VISION_PAGES=20
 
 - **poppler-utils** — fornece `pdftoppm` para renderização de páginas e `pdfimages` (fallback).
   O Dockerfile já instala via `apt-get install poppler-utils`.
+- **Python 3 + PyMuPDF** — usados pelo detector principal `PDF_LAYOUT`
+  (`scripts/extract_pdf_layout.py`). Local: `pip install -r scripts/requirements.txt`
+  (ou `pip install PyMuPDF`). O Dockerfile instala `python3` + `PyMuPDF`. Se o
+  Python/PyMuPDF não estiver disponível, a extração falha graciosamente e cada
+  página cai na heurística/visão.
 
 ## Rodar localmente
 
