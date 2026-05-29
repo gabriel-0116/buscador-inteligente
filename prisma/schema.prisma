@@ -16,23 +16,26 @@ model Supplier {
 }
 
 model Catalog {
-  id              String        @id @default(cuid())
-  supplierId      String
-  fileName        String
-  status          CatalogStatus @default(PROCESSING)
-  pageCount       Int?
-  imageCount      Int?
-  candidateCount  Int?
-  pdfStoragePath  String?
-  error           String?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  id               String        @id @default(cuid())
+  supplierId       String
+  fileName         String
+  status           CatalogStatus @default(PROCESSING)
+  pageCount        Int?
+  imageCount       Int?
+  candidateCount   Int?
+  // Page-level strategy counter — total PageProductMention rows.
+  pageProductCount Int?
+  pdfStoragePath   String?
+  error            String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
 
-  supplier   Supplier           @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  images     ProductImage[]
-  pages      CatalogPage[]
-  candidates ProductCandidate[]
-  analyses   PageAnalysis[]
+  supplier        Supplier             @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  images          ProductImage[]
+  pages           CatalogPage[]
+  candidates      ProductCandidate[]
+  analyses        PageAnalysis[]
+  productMentions PageProductMention[]
 
   @@index([supplierId])
   @@index([status])
@@ -63,9 +66,10 @@ model CatalogPage {
   height     Int
   createdAt  DateTime @default(now())
 
-  catalog    Catalog            @relation(fields: [catalogId], references: [id], onDelete: Cascade)
-  candidates ProductCandidate[]
-  analyses   PageAnalysis[]
+  catalog         Catalog              @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  candidates      ProductCandidate[]
+  analyses        PageAnalysis[]
+  productMentions PageProductMention[]
 
   @@index([catalogId])
   @@unique([catalogId, pageNumber])
@@ -135,6 +139,56 @@ model PageAnalysis {
 
   @@index([catalogId])
   @@index([pageId])
+}
+
+// Page-level search unit — see PAGE_LEVEL_SEARCH_REFACTOR.md.
+// Each row represents one product detected by the multimodal analyzer on a
+// catalog page. There is no crop: the page is the visual result, the
+// mention is the unit of intelligence. The embedding is *textual/semantic*
+// over the consolidated `searchText` — independent from the visual DINOv2
+// embedding still used by the legacy ProductCandidate pipeline.
+model PageProductMention {
+  id        String @id @default(cuid())
+  catalogId String
+  pageId    String
+
+  pageNumber Int
+
+  namePt        String
+  originalName  String?
+  descriptionPt String?
+  category      String?
+  functionGroup String?
+
+  colors              String[]
+  visualAttributes    String[]
+  technicalAttributes String[]
+  notConfuseWith      String[]
+  commercialUse       String?
+
+  isKit       Boolean  @default(false)
+  kitContains String[]
+
+  confidence     Float?
+  evidenceText   String?
+  // "vision" | "pdf_text" | "both" | "manual"
+  evidenceSource String?
+
+  searchText String
+  embedding  Unsupported("vector(1536)")?
+
+  rawJson   Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  catalog Catalog     @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  page    CatalogPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@index([catalogId])
+  @@index([pageId])
+  @@index([functionGroup])
+  @@index([category])
+  @@index([pageNumber])
 }
 
 enum CandidateSourceType {

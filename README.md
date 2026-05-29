@@ -1,25 +1,52 @@
 # Buscador Inteligente de Catálogos
 
-Sistema interno de busca visual por produto. Rafael sobe catálogos em PDF de fornecedores; o sistema detecta recortes de produtos, gera embeddings visuais e permite buscar por imagem similar.
+Sistema interno de busca por produto em catálogos PDF de fornecedores. Rafael
+sobe os catálogos, manda uma foto do produto procurado, e o sistema retorna
+**as páginas dos catálogos** que contêm aquele produto — mostrando qual produto
+da página deu match.
 
-## Pipeline atual
+> **Estratégia atual: busca por página + produtos detectados** (default
+> `CATALOG_PROCESSING_MODE=page_mentions`, ver
+> `PAGE_LEVEL_SEARCH_REFACTOR.md`). O sistema NÃO recorta produtos
+> individualmente para a busca nova. Cada página é renderizada, analisada por
+> um modelo multimodal, e cada produto detectado vira uma linha
+> `PageProductMention` com embedding **textual/semântico**. A página inteira
+> é o resultado visual; o produto detectado é a unidade de inteligência. A
+> função comercial manda mais que aparência — câmera rosa nunca volta como
+> "fone rosa", antena com cabo preto nunca volta como "cabo USB preto".
+
+## Pipeline (page_mentions, default)
 
 ```
 PDF
 → pdftoppm -jpeg -r 180        (renderiza páginas inteiras a 180 DPI)
-→ extractPdfLayout (PyMuPDF)   (extrai a estrutura real do PDF: textos, imagens, desenhos)
 → CatalogPage salvo no Supabase Storage em {catalogId}/pages/
-→ detectProductCandidatesFromPage — cascata PDF_LAYOUT → HEURISTIC → VISION → FALLBACK
+→ extractPdfLayout (PyMuPDF)   (texto da página, usado como evidência)
+→ analyzeCatalogPageProducts  (multimodal: lista produtos visíveis, sem boxes)
+→ PageProductMention (uma linha por produto detectado na página)
+→ searchText consolidado     (nome, função, categoria, atributos, mustNotMatch)
+→ text-embeddings (OpenAI text-embedding-3-small / 1536 dim)
+→ pgvector cosine search sobre PageProductMention
+→ reranker comercial (functionGroup > produto principal > cor > aparência)
+→ resultado = página + produto detectado + tipo de match + motivo
+```
+
+## Pipeline antiga (legacy_crops — preservada)
+
+Para rodar o detector de cards/crops antigo (cascata estrutural + visão),
+defina `CATALOG_PROCESSING_MODE=legacy_crops` no upload e
+`SEARCH_MODE=legacy_candidates` na busca:
+
+```
+PDF
+→ pdftoppm -jpeg -r 180
+→ extractPdfLayout (PyMuPDF)
+→ classifica a página → GRID_LAYOUT → PDF_LAYOUT → HEURISTIC → VISION → FALLBACK
+→ valida produto único por crop (rejeita crops multi-produto)
 → ProductCandidate salvo em {catalogId}/candidates/
 → DINOv2 embedding (Xenova/dinov2-base, 768 dim, CLS token)
 → pgvector cosine search sobre ProductCandidate
 ```
-
-> **PDF_LAYOUT é a pipeline principal.** Em vez de confiar num LLM ou numa
-> heurística de pixels para recortar, usamos a estrutura real do PDF (PyMuPDF):
-> agrupamos imagens + textos próximos em cards de produto. A IA multimodal virou
-> *fallback* — só roda em páginas escaneadas ou sem estrutura. `pdfimages`
-> permanece apenas como artefato legado, não é usado na busca.
 
 ## Variáveis de ambiente
 
@@ -44,21 +71,42 @@ VISION_DETECTOR_MAX_IMAGE_WIDTH   # default 1280 — largura máx da imagem envi
 VISION_DETECTOR_JPEG_QUALITY      # default 75
 VISION_DETECTOR_MAX_OUTPUT_TOKENS # default 800 — boxes-only não precisa de mais
 
-# Detector PDF_LAYOUT (PyMuPDF)
+# Detector estrutural (PyMuPDF)
 PYTHON_BIN                        # interpretador python do extrator (default 'python3')
+CATALOG_DEBUG_PAGES               # ex.: "3,4,5" — logs detalhados por página
+
+# Estratégia page_mentions (default)
+CATALOG_PROCESSING_MODE           # 'page_mentions' (default) | 'legacy_crops'
+SEARCH_MODE                       # 'page_mentions' (default) | 'legacy_candidates'
+PAGE_ANALYZER_MODEL               # modelo multimodal do analyzer (cai p/ VISION_DETECTOR_MODEL_CHEAP)
+PAGE_ANALYZER_MAX_OUTPUT_TOKENS   # default 2400
+QUERY_ANALYZER_MODEL              # modelo p/ analisar a imagem de busca (cai p/ PAGE_ANALYZER_MODEL)
+QUERY_ANALYZER_MAX_OUTPUT_TOKENS  # default 1200
+QUERY_ANALYZER_MAX_IMAGE_WIDTH    # default 1024
+TEXT_EMBEDDING_PROVIDER           # 'openai' (default)
+TEXT_EMBEDDING_MODEL              # default 'text-embedding-3-small'
+TEXT_EMBEDDING_DIMENSIONS         # default 1536 (precisa bater com o schema)
+TEXT_EMBEDDING_API_KEY            # opcional — cai p/ OPENAI_API_KEY / VISION_DETECTOR_API_KEY
 ```
 
 ### Pipeline de detecção em cascata
 
-A ordem é **`PDF_LAYOUT → HEURISTIC → VISION_BOXES_CHEAP → VISION_BOXES_PREMIUM → FALLBACK`**.
-O detector primário (`PDF_LAYOUT`) usa a estrutura real do PDF via PyMuPDF e não
-custa nada. Numa página digital típica ele resolve sozinho e a IA nem é chamada.
+A ordem é **`PAGE_CLASSIFIER → GRID_LAYOUT → PDF_LAYOUT → HEURISTIC → VISION → FALLBACK`**.
+Os detectores primários (`GRID_LAYOUT`, `PDF_LAYOUT`) usam a estrutura real do PDF
+via PyMuPDF e não custam nada. Numa página digital típica eles resolvem sozinhos
+e a IA nem é chamada.
 
-`auto` (padrão) só chama o modelo de visão quando **PDF_LAYOUT e a heurística**
-falham (página escaneada, sem estrutura, crops anormais). Em testes use o
-modelo barato e mantenha `VISION_USE_PREMIUM_FALLBACK=false`. O premium só
-deve ser ligado para resgatar páginas específicas — nunca em catálogo
-inteiro sem limite.
+- O **classificador** marca capa/sumário/índice como não-produto → 0 candidatos
+  pesquisáveis, sem visão.
+- O **GRID_LAYOUT** infere as células de produto pelas posições dos sinais
+  (código, `R$`, `PCS/CX`, `Unid.CX`) e gera 1 box por produto.
+- Cada crop passa por **validação de produto único**: se contém 2+ produtos
+  (2+ preços/PCS-CX), é rejeitado como `multi_card_crop` e nunca é indexado —
+  isso evita embeddings misturados. Crops compostos são subdivididos.
+
+`auto` (padrão) só chama o modelo de visão quando os detectores estruturais **e**
+a heurística falham (página escaneada, sem estrutura). Em testes use o modelo
+barato e mantenha `VISION_USE_PREMIUM_FALLBACK=false`.
 
 `CATALOG_MAX_VISION_PAGES` é um teto absoluto por catálogo: ao atingir o
 limite as páginas restantes ficam com a heurística mesmo no `auto`.
@@ -104,34 +152,35 @@ Certifique-se de ter um arquivo `.env.local` com todas as variáveis acima.
 
 1. Acesse `/busca`.
 2. Faça upload de uma foto do produto que quer encontrar.
-3. Os resultados mostram o recorte (`cropUrl`) do candidato mais similar, com link para a página original.
+3. Cada resultado é uma **página de catálogo** mostrando o produto detectado
+   que deu match, o tipo de match (`exact`/`equivalent`/`variant`/
+   `kit_contains`/`accessory`/`related_but_not_match`), a confiança
+   (`high`/`medium`/`low`) e o motivo. Clique para abrir a página inteira.
 
 ## Como avaliar se o processamento está bom
 
 1. Abra o catálogo em `/catalogos/[catalogId]`.
-2. Confira a seção **Candidatos extraídos**:
-   - Os crops mostram produtos isolados? → pipeline está funcionando bem.
-   - Os crops mostram cards inteiros com logo e texto? → o detector precisa de ajuste.
-   - Não há candidatos? → verifique se `pdftoppm` está instalado e se o PDF é nativo (não escaneado).
-3. Se os crops estiverem ruins, a qualidade da busca não vai melhorar só mexendo no modelo — corrija a detecção primeiro.
-
-## Ajustar o detector de crops
-
-Arquivo: `src/features/catalog-processing/detect-product-candidates.ts`
-
-Parâmetros principais:
-- `GAP_DENSITY` (padrão `0.04`) — sensibilidade para detectar separadores brancos entre produtos.
-- `MIN_GAP_SPAN` (padrão `8` px) — número mínimo de linhas/colunas brancas para considerar separador.
-- `MIN_CROP_PX` (padrão `180`) — dimensão mínima de um crop válido.
-- `MAX_CANDIDATES_PER_PAGE` (padrão `3`) — limite de candidatos por página.
+2. Cada página renderizada mostra os produtos detectados (`PageProductMention`)
+   com nome em pt-BR, `functionGroup`, categoria e cores.
+3. Sinais de problema:
+   - Páginas de capa/sumário aparecendo com produtos → ajustar o prompt do
+     analyzer (`page-product-analyzer.ts`).
+   - `functionGroup` errado para muitos produtos → o reranker vai sofrer;
+     considere um modelo melhor em `PAGE_ANALYZER_MODEL`.
 
 ## Comandos úteis
 
 ```bash
-pnpm dev           # dev server
-pnpm build         # build de produção
-pnpm lint          # eslint
-npx prisma generate           # regenerar client após mudança no schema
-npx prisma migrate deploy     # aplicar migrations em produção
-npx tsx scripts/reindex.ts    # re-indexar ProductImage (legado) com embedding atual
+pnpm dev                                 # dev server
+pnpm build                               # build de produção
+pnpm lint                                # eslint
+npx prisma generate                      # regenerar client após mudança no schema
+npx prisma migrate deploy                # aplicar migrations em produção
+# Debug do analyzer numa página sem tocar o banco:
+npx tsx scripts/test-page-analyzer.ts ~/Downloads/catalogo.pdf 3 4 5
+# Debug da busca fim-a-fim com uma imagem real (usa o banco):
+npx tsx scripts/test-page-search.ts --image ~/Downloads/camera-rosa.jpg
+# Pipeline antiga (legacy_crops):
+npx tsx scripts/test-eletromex.ts ~/Downloads/catalogo.pdf 3 4 5
+npx tsx scripts/reindex.ts               # re-indexar ProductImage (legado)
 ```

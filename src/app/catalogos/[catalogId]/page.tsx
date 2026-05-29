@@ -48,11 +48,15 @@ const rejectLabel: Record<string, string> = {
   bad_card_boundary: "borda contaminada",
   low_boundary: "borda fraca",
   multi_card_crop: "vários cards",
+  non_product_page: "página ignorada",
+  no_product_signal: "sem sinal de produto",
+  grid_detection_failed: "grade não detectada",
   no_products_detected: "sem produtos detectados",
   fallback_used: "fallback heurístico",
 };
 
 const detectorLabel: Record<string, string> = {
+  GRID_LAYOUT: "grid layout",
   PDF_LAYOUT: "pdf layout",
   VISION_JSON: "vision (legado)",
   VISION_JSON_CHEAP: "vision JSON (legado)",
@@ -64,6 +68,7 @@ const detectorLabel: Record<string, string> = {
 };
 
 const detectorBadgeClass: Record<string, string> = {
+  GRID_LAYOUT: "bg-teal-100 text-teal-700",
   PDF_LAYOUT: "bg-emerald-100 text-emerald-700",
   VISION_JSON: "bg-blue-100 text-blue-700",
   VISION_JSON_CHEAP: "bg-blue-100 text-blue-700",
@@ -90,6 +95,23 @@ export default async function CatalogPage({ params }: Props) {
           height: true,
         },
         orderBy: { pageNumber: "asc" },
+      },
+      productMentions: {
+        select: {
+          id: true,
+          pageId: true,
+          pageNumber: true,
+          namePt: true,
+          functionGroup: true,
+          category: true,
+          colors: true,
+          isKit: true,
+          kitContains: true,
+          confidence: true,
+          evidenceText: true,
+          evidenceSource: true,
+        },
+        orderBy: [{ pageNumber: "asc" }, { confidence: "desc" }],
       },
       candidates: {
         select: {
@@ -130,6 +152,16 @@ export default async function CatalogPage({ params }: Props) {
     (c) => c.isSearchable
   ).length;
   const debugCount = catalog.candidates.length - searchableCount;
+  const mentionsCount = catalog.productMentions.length;
+  const mentionsByPage = new Map<
+    number,
+    Array<(typeof catalog.productMentions)[number]>
+  >();
+  for (const m of catalog.productMentions) {
+    const arr = mentionsByPage.get(m.pageNumber) ?? [];
+    arr.push(m);
+    mentionsByPage.set(m.pageNumber, arr);
+  }
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-8 p-6">
@@ -189,9 +221,9 @@ export default async function CatalogPage({ params }: Props) {
             <strong className="text-foreground">{catalog.pageCount}</strong>
           </span>
         )}
-        {catalog.candidateCount != null && (
+        {catalog.candidateCount != null && catalog.candidateCount > 0 && (
           <span>
-            Candidatos:{" "}
+            Candidatos (legado):{" "}
             <strong className="text-foreground">
               {catalog.candidateCount}
             </strong>
@@ -205,6 +237,12 @@ export default async function CatalogPage({ params }: Props) {
                 · {debugCount} debug
               </span>
             )}
+          </span>
+        )}
+        {mentionsCount > 0 && (
+          <span>
+            Produtos detectados:{" "}
+            <strong className="text-foreground">{mentionsCount}</strong>
           </span>
         )}
         {!catalog.pdfStoragePath && catalog.status === "READY" && (
@@ -223,35 +261,94 @@ export default async function CatalogPage({ params }: Props) {
 
       {catalog.status === "READY" && (
         <>
-          {/* Pages */}
+          {/* Pages + mentions */}
           {catalog.pages.length > 0 && (
             <section className="flex flex-col gap-3">
               <h2 className="text-xl font-semibold">
                 Páginas renderizadas ({catalog.pages.length})
+                {mentionsCount > 0 && (
+                  <span className="text-muted-foreground ml-2 text-sm font-normal">
+                    · {mentionsCount} produtos detectados
+                  </span>
+                )}
               </h2>
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                {catalog.pages.map((page) => (
-                  <a
-                    key={page.id}
-                    href={page.imageUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="bg-muted overflow-hidden rounded-md border transition-opacity hover:opacity-90"
-                  >
-                    <div className="relative aspect-[3/4]">
-                      <Image
-                        src={page.imageUrl}
-                        alt={`Página ${page.pageNumber}`}
-                        fill
-                        className="object-contain p-1"
-                        sizes="(max-width: 640px) 50vw, 20vw"
-                      />
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {catalog.pages.map((page) => {
+                  const mentions = mentionsByPage.get(page.pageNumber) ?? [];
+                  return (
+                    <div
+                      key={page.id}
+                      className="overflow-hidden rounded-md border bg-card"
+                    >
+                      <a
+                        href={page.imageUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="bg-muted block transition-opacity hover:opacity-90"
+                      >
+                        <div className="relative aspect-[3/4]">
+                          <Image
+                            src={page.imageUrl}
+                            alt={`Página ${page.pageNumber}`}
+                            fill
+                            className="object-contain p-1"
+                            sizes="(max-width: 640px) 100vw, 33vw"
+                          />
+                        </div>
+                      </a>
+                      <div className="border-t p-2">
+                        <p className="text-muted-foreground text-xs">
+                          Pág. {page.pageNumber}
+                          {mentions.length > 0 && (
+                            <span className="text-foreground ml-1 font-medium">
+                              · {mentions.length} produto
+                              {mentions.length !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </p>
+                        {mentions.length > 0 && (
+                          <ul className="mt-1 flex flex-col gap-1 text-xs">
+                            {mentions.slice(0, 8).map((m) => (
+                              <li
+                                key={m.id}
+                                className="border-l-2 border-emerald-400 pl-2"
+                              >
+                                <p
+                                  className="font-medium leading-tight"
+                                  title={m.namePt}
+                                >
+                                  {m.namePt}
+                                  {m.isKit && (
+                                    <span className="ml-1 rounded bg-indigo-100 px-1 text-[10px] text-indigo-700">
+                                      kit
+                                    </span>
+                                  )}
+                                </p>
+                                {(m.functionGroup || m.category) && (
+                                  <p className="text-muted-foreground truncate">
+                                    {[m.category, m.functionGroup]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </p>
+                                )}
+                                {m.colors.length > 0 && (
+                                  <p className="text-muted-foreground">
+                                    {m.colors.join(", ")}
+                                  </p>
+                                )}
+                              </li>
+                            ))}
+                            {mentions.length > 8 && (
+                              <li className="text-muted-foreground italic">
+                                +{mentions.length - 8} outros
+                              </li>
+                            )}
+                          </ul>
+                        )}
+                      </div>
                     </div>
-                    <p className="text-muted-foreground border-t px-2 py-1 text-center text-xs">
-                      Pág. {page.pageNumber}
-                    </p>
-                  </a>
-                ))}
+                  );
+                })}
               </div>
             </section>
           )}

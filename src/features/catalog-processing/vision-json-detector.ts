@@ -211,7 +211,7 @@ Retorne SOMENTE JSON válido, sem markdown, sem explicação.
 Responda APENAS com o objeto JSON, nada mais.`;
 }
 
-function mediaTypeFromPath(path: string): "image/jpeg" | "image/png" {
+export function mediaTypeFromPath(path: string): "image/jpeg" | "image/png" {
   const ext = extname(path).toLowerCase();
   if (ext === ".png") return "image/png";
   return "image/jpeg";
@@ -331,7 +331,7 @@ async function callOpenAI(args: {
       },
       body: JSON.stringify({
         model: args.model,
-        max_tokens: args.maxTokens,
+        max_completion_tokens: args.maxTokens,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -378,14 +378,14 @@ async function callOpenAI(args: {
 export function isVisionDetectorConfigured(): boolean {
   return Boolean(
     process.env.VISION_DETECTOR_PROVIDER &&
-      process.env.VISION_DETECTOR_API_KEY &&
-      (process.env.VISION_DETECTOR_MODEL_CHEAP ||
-        process.env.VISION_DETECTOR_MODEL_PREMIUM ||
-        process.env.VISION_DETECTOR_MODEL)
+    process.env.VISION_DETECTOR_API_KEY &&
+    (process.env.VISION_DETECTOR_MODEL_CHEAP ||
+      process.env.VISION_DETECTOR_MODEL_PREMIUM ||
+      process.env.VISION_DETECTOR_MODEL)
   );
 }
 
-function resolveProviderAndModel(modelOverride?: string): {
+export function resolveProviderAndModel(modelOverride?: string): {
   provider: "anthropic" | "openai";
   apiKey: string;
   model: string;
@@ -410,7 +410,9 @@ function resolveProviderAndModel(modelOverride?: string): {
   return { provider, apiKey, model };
 }
 
-async function callProvider(args: {
+export type VisionProviderUsage = ProviderCallResult["usage"];
+
+export async function callVisionProvider(args: {
   provider: "anthropic" | "openai";
   apiKey: string;
   model: string;
@@ -439,16 +441,18 @@ async function callProvider(args: {
   });
 }
 
-function logUsage(args: {
+export function logVisionUsage(args: {
   provider: string;
   model: string;
   pageNumber: number;
+  tag?: string;
   usage?: ProviderCallResult["usage"];
 }) {
   if (!args.usage) return;
   const { inputTokens, outputTokens, totalTokens } = args.usage;
+  const tag = args.tag ?? "vision-tokens";
   console.log(
-    `[vision-tokens] page ${args.pageNumber} provider=${args.provider} model=${args.model} input=${inputTokens ?? "?"} output=${outputTokens ?? "?"} total=${totalTokens ?? "?"}`
+    `[${tag}] page ${args.pageNumber} provider=${args.provider} model=${args.model} input=${inputTokens ?? "?"} output=${outputTokens ?? "?"} total=${totalTokens ?? "?"}`
   );
 }
 
@@ -479,7 +483,9 @@ export async function detectProductBoxesWithVision(args: {
   pageHeight: number; // height of the image you send to the model
   modelOverride?: string;
 }): Promise<VisionBoxesResult> {
-  const { provider, apiKey, model } = resolveProviderAndModel(args.modelOverride);
+  const { provider, apiKey, model } = resolveProviderAndModel(
+    args.modelOverride
+  );
 
   const imageBuffer = await readFile(args.pageImagePath);
   const imageBase64 = imageBuffer.toString("base64");
@@ -492,7 +498,7 @@ export async function detectProductBoxesWithVision(args: {
     pageHeight: args.pageHeight,
   });
 
-  const { text, usage } = await callProvider({
+  const { text, usage } = await callVisionProvider({
     provider,
     apiKey,
     model,
@@ -502,7 +508,7 @@ export async function detectProductBoxesWithVision(args: {
     maxTokens,
   });
 
-  logUsage({ provider, model, pageNumber: args.pageNumber, usage });
+  logVisionUsage({ provider, model, pageNumber: args.pageNumber, usage });
 
   const parsed = parseVisionBoxesResponse(text);
 
@@ -539,7 +545,9 @@ export async function detectProductsJsonWithVision(args: {
   pageHeight: number;
   modelOverride?: string;
 }): Promise<VisionDetectorResult> {
-  const { provider, apiKey, model } = resolveProviderAndModel(args.modelOverride);
+  const { provider, apiKey, model } = resolveProviderAndModel(
+    args.modelOverride
+  );
 
   const imageBuffer = await readFile(args.pageImagePath);
   const imageBase64 = imageBuffer.toString("base64");
@@ -552,7 +560,7 @@ export async function detectProductsJsonWithVision(args: {
     pageHeight: args.pageHeight,
   });
 
-  const { text, usage } = await callProvider({
+  const { text, usage } = await callVisionProvider({
     provider,
     apiKey,
     model,
@@ -562,7 +570,7 @@ export async function detectProductsJsonWithVision(args: {
     maxTokens,
   });
 
-  logUsage({ provider, model, pageNumber: args.pageNumber, usage });
+  logVisionUsage({ provider, model, pageNumber: args.pageNumber, usage });
 
   const parsed = parseVisionJsonResponse(text);
 

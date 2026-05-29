@@ -22,6 +22,22 @@ import { rm } from "node:fs/promises";
 import type { PageProduct } from "./product-json-schema";
 import { detectCardsFromPdfLayout } from "./pdf-layout-card-detector";
 import type { PdfLayoutPage } from "./pdf-layout-extractor";
+import {
+  classifyCatalogPage,
+  isNonProductPage,
+  type CatalogPageType,
+} from "./page-type-classifier";
+import {
+  collectTextInPixelBox,
+  detectGridProductBoxes,
+} from "./grid-layout-detector";
+import { splitCompositeProductBox } from "./composite-card-splitter";
+import {
+  estimateProductCount,
+  extractProductSignals,
+  hasProductSignal,
+  looksMultiProduct,
+} from "./product-signals";
 
 export type SourceDetector =
   | "VISION_JSON" // legacy — kept for old rows
@@ -29,12 +45,15 @@ export type SourceDetector =
   | "VISION_JSON_PREMIUM" // legacy — kept for old rows
   | "VISION_BOXES_CHEAP" // MVP cheap model (boxes-only)
   | "VISION_BOXES_PREMIUM" // MVP premium model (boxes-only)
-  | "PDF_LAYOUT" // primary: PyMuPDF structure → card clusters
+  | "GRID_LAYOUT" // primary: text+geometry grid of product cells
+  | "PDF_LAYOUT" // PyMuPDF image-anchored cards (validated)
   | "HEURISTIC"
   | "FALLBACK";
 
 export type DetectionDecision =
+  | "GRID_LAYOUT"
   | "PDF_LAYOUT"
+  | "PAGE_SKIP" // classifier marked the page non-product
   | "HEURISTIC"
   | "VISION_CHEAP"
   | "VISION_PREMIUM"
@@ -149,6 +168,9 @@ const SEVERE_REJECTS = new Set([
   "bad_card_boundary",
   "low_boundary",
   "multi_card_crop",
+  "non_product_page",
+  "no_product_signal",
+  "grid_detection_failed",
 ]);
 
 // ── Low-level pixel helpers ──────────────────────────────────────────────────
@@ -890,17 +912,246 @@ async function runHeuristicWithRules(
   return candidates;
 }
 
-// ── PDF_LAYOUT detector (primary) ─────────────────────────────────────────────
+// ── Single-product crop validation ───────────────────────────────────────────
 //
-// Crops the card boxes produced from the PDF's real structure (PyMuPDF), then
-// reuses the same standalone quality scorer the vision path uses. Hard card
-// rules are applied by the caller via enforceHardCardRules.
+// The decisive guard against multi-product crops: count the per-product signals
+// (code / price / PCS-CX) that actually fall inside the crop. Two products ⇒
+// two prices / two PCS-CX ⇒ reject. Color- and supplier-agnostic.
+
+async function cropHasVisualContent(imagePath: string): Promise<boolean> {
+  try {
+    const { data, info } = await sharp(imagePath)
+      .resize(80, 80, { fit: "fill" })
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .toColorspace("srgb")
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const box: Box = { x1: 0, y1: 0, x2: 79, y2: 79 };
+    const stats = pixelStats(data, info.channels, 80, box);
+    return stats.nonWhiteRatio >= 0.05;
+  } catch {
+    return true; // assume content on failure — don't drop a real product
+  }
+}
+
+export async function validateSingleProductCrop(args: {
+  cropImagePath: string;
+  cropText?: string;
+  cropBox: { x: number; y: number; width: number; height: number };
+  pageWidth: number;
+  pageHeight: number;
+}): Promise<{
+  valid: boolean;
+  rejectReason?: string;
+  singleProductScore: number;
+  signalCount: {
+    productCodes: number;
+    prices: number;
+    pcsCx: number;
+    unitCx: number;
+  };
+}> {
+  const signals = extractProductSignals({ text: args.cropText ?? "" });
+  const signalCount = {
+    productCodes: signals.productCodes.length,
+    prices: signals.priceCount,
+    pcsCx: signals.pcsCxCount,
+    unitCx: signals.unitCxCount,
+  };
+
+  // Looks like an index/table chunk that slipped through.
+  if (signals.categoryWords.length >= 4 && !hasProductSignal(signals)) {
+    return {
+      valid: false,
+      rejectReason: "non_product_page",
+      singleProductScore: 0,
+      signalCount,
+    };
+  }
+
+  // Two or more products' worth of signals → multi-card.
+  if (looksMultiProduct(signals)) {
+    return {
+      valid: false,
+      rejectReason: "multi_card_crop",
+      singleProductScore: 0,
+      signalCount,
+    };
+  }
+
+  if (!hasProductSignal(signals)) {
+    // No text signal — only valid if there's a clear product image.
+    const hasImage = await cropHasVisualContent(args.cropImagePath);
+    if (!hasImage) {
+      return {
+        valid: false,
+        rejectReason: "no_product_signal",
+        singleProductScore: 0,
+        signalCount,
+      };
+    }
+    return { valid: true, singleProductScore: 0.55, signalCount };
+  }
+
+  // Exactly one product's worth of signals.
+  const richness =
+    (signalCount.productCodes > 0 ? 1 : 0) +
+    (signalCount.prices > 0 ? 1 : 0) +
+    (signalCount.pcsCx > 0 || signalCount.unitCx > 0 ? 1 : 0);
+  const singleProductScore = Math.min(0.95, 0.7 + richness * 0.08);
+  return { valid: true, singleProductScore, signalCount };
+}
+
+// ── Box → validated candidate (shared by GRID_LAYOUT and PDF_LAYOUT) ─────────
+
+async function cropBoxToCandidate(args: {
+  box: { x: number; y: number; width: number; height: number };
+  pageImagePath: string;
+  outputDir: string;
+  pageNumber: number;
+  cropIndex: number;
+  tag: string;
+  confidence: number;
+  sourceDetector: SourceDetector;
+  pageLayout?: PdfLayoutPage;
+  renderedWidth: number;
+  renderedHeight: number;
+}): Promise<DetectedCandidate | null> {
+  const sx = Math.max(
+    0,
+    Math.min(args.renderedWidth - 1, Math.round(args.box.x))
+  );
+  const sy = Math.max(
+    0,
+    Math.min(args.renderedHeight - 1, Math.round(args.box.y))
+  );
+  const sw = Math.max(
+    1,
+    Math.min(args.renderedWidth - sx, Math.round(args.box.width))
+  );
+  const sh = Math.max(
+    1,
+    Math.min(args.renderedHeight - sy, Math.round(args.box.height))
+  );
+
+  const prefix = `page-${String(args.pageNumber).padStart(3, "0")}-${args.tag}-${String(args.cropIndex).padStart(2, "0")}`;
+  const imagePath = join(args.outputDir, `${prefix}.jpg`);
+  try {
+    await sharp(args.pageImagePath)
+      .extract({ left: sx, top: sy, width: sw, height: sh })
+      .flatten({ background: { r: 255, g: 255, b: 255 } })
+      .jpeg({ quality: 90 })
+      .toFile(imagePath);
+  } catch (err) {
+    console.error(
+      `[${args.tag}] page ${args.pageNumber} crop ${args.cropIndex} extract failed:`,
+      err
+    );
+    return null;
+  }
+
+  const cropText = args.pageLayout
+    ? collectTextInPixelBox(
+        args.pageLayout,
+        { x: sx, y: sy, width: sw, height: sh },
+        args.renderedWidth,
+        args.renderedHeight
+      )
+    : undefined;
+
+  const quality = await evaluateCropImageQuality(imagePath);
+  const validation = await validateSingleProductCrop({
+    cropImagePath: imagePath,
+    cropText,
+    cropBox: { x: sx, y: sy, width: sw, height: sh },
+    pageWidth: args.renderedWidth,
+    pageHeight: args.renderedHeight,
+  });
+
+  const rejectReason =
+    quality.rejectReason ??
+    (validation.valid ? undefined : validation.rejectReason);
+  const isSearchable =
+    shouldIndexCrop(quality.score, quality.rejectReason) && validation.valid;
+
+  return {
+    imagePath,
+    x: sx,
+    y: sy,
+    width: sw,
+    height: sh,
+    confidence: args.confidence,
+    qualityScore: quality.score,
+    isSearchable,
+    rejectReason,
+    sourceDetector: args.sourceDetector,
+    originalText: cropText ? cropText.slice(0, 160) : undefined,
+  };
+}
+
+// ── GRID_LAYOUT detector (primary) ───────────────────────────────────────────
+
+async function runGridLayoutDetector(args: {
+  pageImagePath: string;
+  outputDir: string;
+  pageNumber: number;
+  pageLayout: PdfLayoutPage;
+  pageText: string;
+  pageType: CatalogPageType;
+  renderedWidth: number;
+  renderedHeight: number;
+}): Promise<{
+  candidates: DetectedCandidate[];
+  pageAnalysis: PageAnalysisInfo;
+}> {
+  await mkdir(args.outputDir, { recursive: true });
+  const boxes = detectGridProductBoxes({
+    pageLayout: args.pageLayout,
+    pageText: args.pageText,
+    pageType: args.pageType,
+    renderedWidth: args.renderedWidth,
+    renderedHeight: args.renderedHeight,
+  });
+
+  const candidates: DetectedCandidate[] = [];
+  let cropIndex = 1;
+  for (const box of boxes) {
+    const cand = await cropBoxToCandidate({
+      box,
+      pageImagePath: args.pageImagePath,
+      outputDir: args.outputDir,
+      pageNumber: args.pageNumber,
+      cropIndex,
+      tag: "grid",
+      confidence: box.confidence,
+      sourceDetector: "GRID_LAYOUT",
+      pageLayout: args.pageLayout,
+      renderedWidth: args.renderedWidth,
+      renderedHeight: args.renderedHeight,
+    });
+    if (cand) {
+      candidates.push(cand);
+      cropIndex++;
+    }
+  }
+
+  return {
+    candidates,
+    pageAnalysis: {
+      productsCount: boxes.length,
+      sourceDetector: "GRID_LAYOUT",
+    },
+  };
+}
+
+// ── PDF_LAYOUT detector (image-anchored, validated + composite split) ─────────
 
 async function runPdfLayoutDetector(args: {
   pageImagePath: string;
   outputDir: string;
   pageNumber: number;
   pageLayout: PdfLayoutPage;
+  pageText: string;
   renderedWidth: number;
   renderedHeight: number;
 }): Promise<{
@@ -918,54 +1169,60 @@ async function runPdfLayoutDetector(args: {
   const candidates: DetectedCandidate[] = [];
   let cropIndex = 1;
   for (const card of cards) {
-    const sx = Math.max(
-      0,
-      Math.min(args.renderedWidth - 1, Math.round(card.x))
-    );
-    const sy = Math.max(
-      0,
-      Math.min(args.renderedHeight - 1, Math.round(card.y))
-    );
-    const sw = Math.max(
-      1,
-      Math.min(args.renderedWidth - sx, Math.round(card.width))
-    );
-    const sh = Math.max(
-      1,
-      Math.min(args.renderedHeight - sy, Math.round(card.height))
-    );
-
-    const prefix = `page-${String(args.pageNumber).padStart(3, "0")}-pdf-${String(cropIndex).padStart(2, "0")}`;
-    const imagePath = join(args.outputDir, `${prefix}.jpg`);
-    try {
-      await sharp(args.pageImagePath)
-        .extract({ left: sx, top: sy, width: sw, height: sh })
-        .flatten({ background: { r: 255, g: 255, b: 255 } })
-        .jpeg({ quality: 90 })
-        .toFile(imagePath);
-    } catch (err) {
-      console.error(
-        `[pdf-layout] page ${args.pageNumber} crop ${cropIndex} extract failed:`,
-        err
-      );
-      continue;
-    }
-
-    const quality = await evaluateCropImageQuality(imagePath);
-    candidates.push({
-      imagePath,
-      x: sx,
-      y: sy,
-      width: sw,
-      height: sh,
+    const cand = await cropBoxToCandidate({
+      box: card,
+      pageImagePath: args.pageImagePath,
+      outputDir: args.outputDir,
+      pageNumber: args.pageNumber,
+      cropIndex,
+      tag: "pdf",
       confidence: PDF_LAYOUT_CONFIDENCE,
-      qualityScore: quality.score,
-      isSearchable: shouldIndexCrop(quality.score, quality.rejectReason),
-      rejectReason: quality.rejectReason,
       sourceDetector: "PDF_LAYOUT",
-      originalText: card.text,
+      pageLayout: args.pageLayout,
+      renderedWidth: args.renderedWidth,
+      renderedHeight: args.renderedHeight,
     });
+    if (!cand) continue;
     cropIndex++;
+
+    // Composite crop (multiple products) → try to split into single-product
+    // sub-cards using the signal positions inside it.
+    if (cand.rejectReason === "multi_card_crop") {
+      const subs = await splitCompositeProductBox({
+        pageImagePath: args.pageImagePath,
+        pageLayout: args.pageLayout,
+        box: { x: cand.x, y: cand.y, width: cand.width, height: cand.height },
+        pageWidth: args.renderedWidth,
+        pageHeight: args.renderedHeight,
+      });
+      const validSubs: DetectedCandidate[] = [];
+      for (const sub of subs) {
+        const subCand = await cropBoxToCandidate({
+          box: sub,
+          pageImagePath: args.pageImagePath,
+          outputDir: args.outputDir,
+          pageNumber: args.pageNumber,
+          cropIndex,
+          tag: "pdfsplit",
+          confidence: sub.confidence,
+          sourceDetector: "PDF_LAYOUT",
+          pageLayout: args.pageLayout,
+          renderedWidth: args.renderedWidth,
+          renderedHeight: args.renderedHeight,
+        });
+        if (subCand) cropIndex++;
+        if (subCand && subCand.isSearchable) validSubs.push(subCand);
+      }
+      if (validSubs.length >= 2) {
+        console.log(
+          `[pdf-layout-split] page ${args.pageNumber} card ${cand.width}x${cand.height} -> ${validSubs.length} subcards`
+        );
+        candidates.push(...validSubs);
+        continue; // drop the composite original
+      }
+      // Couldn't split → keep original as non-searchable debug.
+    }
+    candidates.push(cand);
   }
 
   return {
@@ -977,38 +1234,47 @@ async function runPdfLayoutDetector(args: {
   };
 }
 
-type PdfLayoutQuality = {
+type StructuralQuality = {
   good: boolean;
   reason: string;
   searchableCount: number;
 };
 
 /**
- * Decide whether the PDF_LAYOUT result is trustworthy enough to skip the
- * heuristic / vision tiers. A page with no product photos is trusted to have
- * no products (no escalation). Otherwise we need at least one searchable card;
- * if every cluster failed the quality / hard-rule checks, the page is probably
- * scanned or oddly structured → escalate.
+ * Decide whether a structural detector (GRID_LAYOUT / PDF_LAYOUT) is
+ * trustworthy enough to skip the heuristic / vision tiers.
+ *
+ * No longer "≥1 searchable wins". A category grid must produce a count
+ * compatible with the page's product signals — if the page has 9 codes/prices
+ * and we only got 1–3 crops, the rest were merged or dropped, so escalate.
  */
-function evaluatePdfLayoutQuality(
-  candidates: DetectedCandidate[],
-  pageLayout: PdfLayoutPage
-): PdfLayoutQuality {
-  const imageBlocks = pageLayout.blocks.filter(
-    (b) => b.type === "image"
-  ).length;
-  const searchableCount = candidates.filter((c) => c.isSearchable).length;
-  if (imageBlocks === 0) {
-    return { good: true, reason: "no_product_images", searchableCount };
+function evaluateStructuralQuality(args: {
+  candidates: DetectedCandidate[];
+  pageType: CatalogPageType;
+  expectedProducts: number;
+}): StructuralQuality {
+  if (isNonProductPage(args.pageType)) {
+    return { good: false, reason: "non_product_page", searchableCount: 0 };
   }
-  if (searchableCount >= 1) {
-    return {
-      good: true,
-      reason: `searchable=${searchableCount}`,
-      searchableCount,
-    };
+  const searchableCount = args.candidates.filter((c) => c.isSearchable).length;
+  if (searchableCount === 0) {
+    return { good: false, reason: "no_searchable", searchableCount };
   }
-  return { good: false, reason: "no_searchable_clusters", searchableCount };
+  if (args.pageType === "category_grid" && args.expectedProducts >= 4) {
+    const need = Math.ceil(args.expectedProducts * 0.6);
+    if (searchableCount < need) {
+      return {
+        good: false,
+        reason: `below_expected_grid(${searchableCount}/${args.expectedProducts})`,
+        searchableCount,
+      };
+    }
+  }
+  return {
+    good: true,
+    reason: `searchable=${searchableCount}`,
+    searchableCount,
+  };
 }
 
 // ── Vision-detector pipeline ────────────────────────────────────────────────
@@ -1401,6 +1667,16 @@ function makeHeuristicResult(
   };
 }
 
+/** Pages listed in CATALOG_DEBUG_PAGES get verbose per-page logging. */
+function isPageDebugged(pageNumber: number): boolean {
+  const raw = process.env.CATALOG_DEBUG_PAGES;
+  if (!raw) return false;
+  return raw
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .includes(pageNumber);
+}
+
 export async function detectProductCandidatesFromPage(args: {
   pageImagePath: string;
   outputDir: string;
@@ -1421,29 +1697,124 @@ export async function detectProductCandidatesFromPage(args: {
   const renderedWidth = pageMeta.width ?? 0;
   const renderedHeight = pageMeta.height ?? 0;
 
-  // ── Tier 1: PDF_LAYOUT (PyMuPDF structure) ──────────────────────────────
-  // Primary detector. Skipped only in legacy mode=always (pure vision testing).
+  // ── Page classification (text + geometry, never color) ──────────────────
+  let pageType: CatalogPageType = "unknown";
+  let pageText = "";
+  let expectedProducts = 0;
+  if (args.pageLayout) {
+    pageText = args.pageLayout.blocks
+      .filter((b) => b.type === "text" && b.text)
+      .map((b) => b.text as string)
+      .join("\n");
+    const pageSignals = extractProductSignals({ text: pageText });
+    expectedProducts = estimateProductCount(pageSignals);
+    pageType = classifyCatalogPage({
+      pageNumber: args.pageNumber,
+      pageText,
+      pageLayout: args.pageLayout,
+      renderedWidth,
+      renderedHeight,
+    });
+    console.log(
+      `[page-classifier] page ${args.pageNumber} type=${pageType} codes=${pageSignals.productCodes.length} prices=${pageSignals.priceCount} pcs=${pageSignals.pcsCxCount} categoryWords=${pageSignals.categoryWords.length}`
+    );
+    if (isPageDebugged(args.pageNumber)) {
+      console.log(
+        `[debug] page ${args.pageNumber} type=${pageType} expected=${expectedProducts} signals=${JSON.stringify(pageSignals)} rendered=${renderedWidth}x${renderedHeight}`
+      );
+    }
+  }
+
+  // ── Non-product page → never index, never call vision ───────────────────
+  if (mode !== "always" && isNonProductPage(pageType)) {
+    console.log(
+      `[detector] page ${args.pageNumber}: ${pageType} → PAGE_SKIP (0 searchable, no vision)`
+    );
+    return {
+      candidates: [],
+      pageAnalysis: { productsCount: 0, sourceDetector: "PDF_LAYOUT" },
+      stats: {
+        decision: "PAGE_SKIP",
+        visionCallsMade: 0,
+        heuristicQualityReason: pageType,
+        budgetRemainingBefore: budgetBefore,
+        budgetRemainingAfter: budgetBefore,
+      },
+    };
+  }
+
+  // ── Structural tiers: GRID_LAYOUT, then PDF_LAYOUT (both validated) ──────
+  // Skipped only in legacy mode=always (pure vision testing).
   if (
     mode !== "always" &&
     args.pageLayout &&
     renderedWidth > 0 &&
     renderedHeight > 0
   ) {
+    // Tier 1: GRID_LAYOUT — text+geometry grid of individual product cells.
+    try {
+      const grid = await runGridLayoutDetector({
+        pageImagePath: args.pageImagePath,
+        outputDir: args.outputDir,
+        pageNumber: args.pageNumber,
+        pageLayout: args.pageLayout,
+        pageText,
+        pageType,
+        renderedWidth,
+        renderedHeight,
+      });
+      await enforceHardCardRules(
+        grid.candidates,
+        renderedWidth,
+        renderedHeight
+      );
+      const gq = evaluateStructuralQuality({
+        candidates: grid.candidates,
+        pageType,
+        expectedProducts,
+      });
+      console.log(
+        `[grid-layout] page ${args.pageNumber} boxes=${grid.pageAnalysis.productsCount} searchable=${gq.searchableCount} accepted=${gq.good} reason=${gq.reason}`
+      );
+      if (gq.good) {
+        return {
+          candidates: grid.candidates,
+          pageAnalysis: grid.pageAnalysis,
+          stats: {
+            decision: "GRID_LAYOUT",
+            visionCallsMade: 0,
+            budgetRemainingBefore: budgetBefore,
+            budgetRemainingAfter: budgetBefore,
+          },
+        };
+      }
+    } catch (err) {
+      console.error(
+        `[grid-layout] page ${args.pageNumber} failed (${err instanceof Error ? err.message : String(err)})`
+      );
+    }
+
+    // Tier 2: PDF_LAYOUT — image-anchored cards, validated + composite-split.
     try {
       const pdf = await runPdfLayoutDetector({
         pageImagePath: args.pageImagePath,
         outputDir: args.outputDir,
         pageNumber: args.pageNumber,
         pageLayout: args.pageLayout,
+        pageText,
         renderedWidth,
         renderedHeight,
       });
       await enforceHardCardRules(pdf.candidates, renderedWidth, renderedHeight);
-      const quality = evaluatePdfLayoutQuality(pdf.candidates, args.pageLayout);
-      if (quality.good) {
-        console.log(
-          `[detector] page ${args.pageNumber}: PDF_LAYOUT accepted (${quality.reason}) → ${pdf.candidates.length} candidates, ${quality.searchableCount} searchable, no vision call`
-        );
+      const pq = evaluateStructuralQuality({
+        candidates: pdf.candidates,
+        pageType,
+        expectedProducts,
+      });
+      console.log(
+        `[pdf-layout] page ${args.pageNumber} rawCards=${pdf.pageAnalysis.productsCount} searchable=${pq.searchableCount} accepted=${pq.good} reason=${pq.reason}`
+      );
+      if (pq.good) {
         return {
           candidates: pdf.candidates,
           pageAnalysis: pdf.pageAnalysis,
@@ -1455,13 +1826,10 @@ export async function detectProductCandidatesFromPage(args: {
           },
         };
       }
-      console.log(
-        `[detector] page ${args.pageNumber}: PDF_LAYOUT rejected (${quality.reason}) → HEURISTIC`
-      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(
-        `[detector] page ${args.pageNumber}: PDF_LAYOUT failed (${msg}) → HEURISTIC`
+        `[pdf-layout] page ${args.pageNumber} failed (${msg}) → HEURISTIC`
       );
     }
   }

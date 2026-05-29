@@ -24,21 +24,35 @@ npx prisma studio         # local DB browser
 # Debug scripts
 npx tsx scripts/reindex.ts        # re-index legacy ProductImage records (not used for search anymore)
 npx tsx scripts/test-detector.ts  # exercise the candidate detector on a local page image
+# Validate the structural cascade page-by-page on a real PDF — no DB, no Supabase, no cost.
+# Prints `page  type  decision  searchable/total  flags`. Vision off by default (TEST_VISION=1 to include it).
+npx tsx scripts/test-eletromex.ts <catalog.pdf> [page page ...]
 ```
 
 ## Architecture
 
-**Purpose:** Internal image-similarity search tool — upload supplier PDF catalogs, detect product regions, search by image.
+**Purpose:** Internal product-search tool — upload supplier PDF catalogs, search by image, get back the **catalog pages** containing the queried product. The page is the visual result; the product detected on the page is the unit of intelligence (function group > main product > color > look). See `PAGE_LEVEL_SEARCH_REFACTOR.md` for the full rationale.
 
-**Stack:** Next.js 16 App Router · TypeScript · Tailwind v4 · shadcn/ui · Supabase (PostgreSQL + Storage) · Prisma 7 · DINOv2 embeddings via `@xenova/transformers` · PyMuPDF (Python) PDF-structure detector (primary) · Multimodal vision detector (Anthropic Claude or OpenAI GPT-4o) as fallback
+**Stack:** Next.js 16 App Router · TypeScript · Tailwind v4 · shadcn/ui · Supabase (PostgreSQL + Storage) · Prisma 7 · PyMuPDF (Python) for PDF text/layout · OpenAI / Anthropic multimodal models for the page analyzer + image query profile · OpenAI text-embedding-3-small (1536 dim) for semantic search · DINOv2 (`@xenova/transformers`, 768 dim) for the legacy visual-crop path.
 
-### Data flow
+### Two processing modes
 
-1. **Catalog upload** (`POST /api/catalogs`): receives PDF via FormData, saves it to `/tmp`, fires `processCatalog` (fire-and-forget). `processCatalog` uploads the original PDF to Supabase Storage at `{catalogId}/original/catalog.pdf` (so the catalog can be reprocessed later), renders each page with `pdftoppm -jpeg -r 180`, uploads pages to `{catalogId}/pages/page-NNN.jpg`, runs `extractPdfLayout` **once** (PyMuPDF, the primary detector's input), then runs `detectProductCandidatesFromPage` per page (passing that page's layout) to produce crop candidates, uploads crops to `{catalogId}/candidates/candidate-NNNN.jpg` (and optionally `card-NNNN.jpg` for the surrounding card), inserts `CatalogPage` + `ProductCandidate` rows. **Embeddings are only generated when `candidate.isSearchable && candidate.qualityScore >= 0.60`** (matches `QUALITY_THRESHOLD`) — rejected crops are kept for debug with `embedding = NULL`. Final step sets `Catalog.status → READY`. Note the two distinct gates: embedding/indexing requires `>= 0.60`, but search (#2) re-filters at a looser `>= 0.50` floor (`MIN_QUALITY`).
+| Mode | `CATALOG_PROCESSING_MODE` | `SEARCH_MODE` | What it does |
+|---|---|---|---|
+| **Page mentions** (default) | `page_mentions` | `page_mentions` | Renders pages → analyzer extracts `PageProductMention` rows (no crops) → searchText → text embedding (1536). Search analyzes the query image to a structured `ImageQueryProfile`, pgvector-searches mentions, reranks commercially, returns *pages*. |
+| **Legacy crops** | `legacy_crops` | `legacy_candidates` | The original cascade (`GRID_LAYOUT → PDF_LAYOUT → HEURISTIC → VISION → FALLBACK`) writes `ProductCandidate` rows with DINOv2 visual embeddings. Crop-based search. Kept for compatibility — not the direction. |
 
-2. **Visual search** (`POST /api/search`): receives image via FormData, generates a DINOv2 embedding, queries `ProductCandidate` with pgvector cosine distance, filtering on `embedding IS NOT NULL AND isSearchable = true AND qualityScore >= 0.50`. Results are sorted to prefer `PAGE_CROP` over other source types, deduped by `cropUrl` and near-identical similarity within the same catalog, capped at 20.
+### Data flow — page_mentions (default)
 
-3. **Reprocess** (`POST /api/catalogs/[catalogId]/reprocess`): deletes old `ProductCandidate` + `CatalogPage` rows + their storage files, downloads the original PDF from `pdfStoragePath`, writes to `/tmp`, and re-runs `processCatalog`. Requires `Catalog.pdfStoragePath` to be set — catalogs uploaded before that field existed must be re-uploaded.
+1. **Catalog upload** (`POST /api/catalogs`): receives PDF, saves it to `/tmp`, fires `processCatalog` (fire-and-forget). `processCatalog` uploads the original PDF to Supabase Storage at `{catalogId}/original/catalog.pdf`, renders each page with `pdftoppm -jpeg -r 180`, uploads pages to `{catalogId}/pages/page-NNN.jpg`, runs `extractPdfLayout` once (PyMuPDF text/blocks as evidence). For each page it calls `analyzeCatalogPageProducts` (multimodal — boxes-free; the model lists the products visible on the page with `namePt`, `functionGroup`, `colors`, `notConfuseWith`, `isKit`, etc.). Each product becomes a `PageProductMention`. A consolidated `searchText` is built per mention and embedded with `text-embedding-3-small` (1536 dim) — written via raw SQL into the `vector(1536)` column. Final step sets `Catalog.status → READY` and updates `pageProductCount`.
+
+2. **Visual search** (`POST /api/search`): receives image via FormData, normalizes/EXIF-rotates via sharp, calls `analyzeImageQueryProfile` → `ImageQueryProfile` (mainProductNamePt, functionGroup, mustNotMatch, …), builds `searchText`, embeds, runs `searchPagesByQueryProfile`: pgvector top-N over `PageProductMention.embedding`, then `rerankPageProductMentions` applies commercial rules (functionGroup first → main product → color → look; `mustNotMatch` triggers rejection), then groups by page keeping the top match per page. Response shape: `{ mode, profile, results: PageSearchResult[] }` where each result has `pageImageUrl`, `matchedProductName`, `matchType`, `confidence`, `reason`, `otherMatches`.
+
+3. **Reprocess** (`POST /api/catalogs/[catalogId]/reprocess`): deletes old rows + storage files, downloads the original PDF from `pdfStoragePath`, re-runs `processCatalog`. Requires `Catalog.pdfStoragePath`.
+
+### Data flow — legacy_crops (preserved)
+
+Set `CATALOG_PROCESSING_MODE=legacy_crops` and `SEARCH_MODE=legacy_candidates` to use the original cascade detector. Same upload entrypoint; falls through `detectProductCandidatesFromPage` (`PAGE_CLASSIFIER → GRID_LAYOUT → PDF_LAYOUT → HEURISTIC → VISION → FALLBACK`), writes `ProductCandidate` rows with DINOv2 (`vector(768)`) embeddings. Search: DINOv2 query embedding → cosine over `ProductCandidate`, filter `isSearchable && qualityScore >= 0.50`, prefer `PAGE_CROP`, dedupe.
 
 ### Storage layout
 
@@ -46,30 +60,50 @@ npx tsx scripts/test-detector.ts  # exercise the candidate detector on a local p
 product-images/
   {catalogId}/
     original/     ← original PDF (used for reprocessing)
-    pages/        ← full rendered pages (source/debug)
-    candidates/   ← product crops + optional `card-NNNN.jpg` per candidate
+    pages/        ← full rendered pages — the visual result of page_mentions search
+    candidates/   ← legacy_crops only: product crops + optional `card-NNNN.jpg`
     embedded/     ← legacy pdfimages output (not used for search)
 ```
 
+### Page-level modules (page_mentions)
+
+| File | Role |
+|---|---|
+| `src/features/catalog-processing/page-product-analyzer.ts` | `analyzeCatalogPageProducts` — multimodal page analyzer (no boxes). Reuses `VISION_DETECTOR_PROVIDER`/`API_KEY`; model from `PAGE_ANALYZER_MODEL`. Output: `PageProductAnalysis` (Zod-validated). Also exports `buildPageProductSearchText` for the embedding input. |
+| `src/features/semantic-search/text-embeddings.ts` | `generateTextEmbedding` / `generateTextEmbeddings` (batched). Uses `TEXT_EMBEDDING_*` envs. Always normalizes the vector and returns `TEXT_EMBEDDING_DIMENSIONS` floats (default 1536). |
+| `src/features/visual-search/query-image-analyzer.ts` | `analyzeImageQueryProfile{,FromFile}` — image → `ImageQueryProfile` (mainProductNamePt, functionGroup, mustNotMatch, …). Also exports `buildImageQuerySearchText`. |
+| `src/features/semantic-search/rerank-page-products.ts` | `rerankPageProductMentions` — commercial reranker: functionGroup > main product > color > look; mustNotMatch is a hard reject. Returns `matchType` + `confidence` + `score` + `reason`. |
+| `src/features/semantic-search/page-search.ts` | `searchPagesByQueryProfile` — pgvector top-N over `PageProductMention.embedding`, rerank, group by page → `PageSearchResult[]`. |
+| `src/components/page-search-results.tsx` | UI for `/busca` when `mode=page_mentions`. |
+| `scripts/test-page-analyzer.ts` | CLI: run analyzer on chosen pages of a PDF, no DB. |
+| `scripts/test-page-search.ts` | CLI: end-to-end search (image → profile → DB → ranked pages). |
+
 ### Detection pipeline (cascade — PDF-structure-first, cost-aware)
 
-`detectProductCandidatesFromPage()` orchestrates a **cascade** whose primary detector is the PDF's own structure (PyMuPDF), not an LLM. The LLM is a fallback for scanned / structureless pages. Order: **`PDF_LAYOUT → HEURISTIC → VISION_BOXES_CHEAP → VISION_BOXES_PREMIUM → FALLBACK`**.
+`detectProductCandidatesFromPage()` orchestrates a **cascade** whose primary detectors read the PDF's own structure (PyMuPDF), not an LLM. The LLM is a fallback for scanned / structureless pages. Order: **`PAGE_CLASSIFIER → GRID_LAYOUT → PDF_LAYOUT → HEURISTIC → VISION_BOXES_CHEAP → VISION_BOXES_PREMIUM → FALLBACK`**.
+
+The decisive guard against the "one crop = several products" failure (which poisons embeddings) is **per-crop signal validation**: count the per-product markers (`R$` prices, `PCS/CX`, `Unid.CX`, product codes) that fall *inside* a crop. ≥2 ⇒ `multi_card_crop` ⇒ never searchable. See `product-signals.ts` / `validateSingleProductCrop`.
 
 `VISION_DETECTOR_MODE` still gates the vision tiers:
 
-- **`off`** — never call vision; `PDF_LAYOUT → HEURISTIC` only.
-- **`always`** — skip PDF_LAYOUT + heuristic, call the cheap vision model directly (legacy / pure-vision testing).
+- **`off`** — never call vision; `classifier → GRID_LAYOUT → PDF_LAYOUT → HEURISTIC` only.
+- **`always`** — skip classifier + structural + heuristic, call the cheap vision model directly (legacy / pure-vision testing).
 - **`auto`** (default) — full cascade below.
 
 In **auto** mode, per page:
 
-1. **PDF_LAYOUT (primary).** If a `pageLayout` was extracted, `runPdfLayoutDetector` crops the cards from `detectCardsFromPdfLayout()`, scores each with `evaluateCropImageQuality()`, and applies `enforceHardCardRules()`. `evaluatePdfLayoutQuality()` accepts when: the page has no product images (trusted "no products", no escalation), or ≥1 searchable card survived. If accepted → ship, **no heuristic, no vision call**. `sourceDetector = PDF_LAYOUT`.
-2. **HEURISTIC.** PDF_LAYOUT rejected (had images but 0 searchable cards → likely scanned/odd) → run the whitespace-gap splitter + `enforceHardCardRules()`, score with `evaluateHeuristicQuality()` (good when `searchableCount >= estimateExpectedProductCount`, no searchable crop with aspect > 3.0 or < 0.33, avg `qualityScore` ≥ 0.80, severe rejects don't outnumber searchable). If good → ship. `sourceDetector = HEURISTIC`.
-3. **VISION_BOXES_CHEAP.** Heuristic bad → call `VISION_DETECTOR_MODEL_CHEAP` (boxes-only).
-4. **VISION_BOXES_PREMIUM.** `VISION_USE_PREMIUM_FALLBACK=true` AND cheap returned 0 boxes on a productful page → retry with `VISION_DETECTOR_MODEL_PREMIUM`.
-5. **FALLBACK.** Vision throws (auth / network / parse) → use the heuristic candidates we already have. `sourceDetector = FALLBACK`.
+0. **PAGE_CLASSIFIER** (`classifyCatalogPage`). From page text + layout (never color): `cover` / `summary` / `category_grid` / `partial_grid` / `single_product` / `non_product` / `unknown`. A `cover`/`summary`/`non_product` page returns **0 searchable, no vision** (`decision = PAGE_SKIP`).
+1. **GRID_LAYOUT (primary)** (`grid-layout-detector.ts`). For `category_grid` / `partial_grid`: cluster the positions of signal-bearing text blocks into rows/columns, build one box per gridline cell that contains a product signal, **clamp each box to its cell** (so it can't span neighbours). Crop → `validateSingleProductCrop` → `enforceHardCardRules`. `evaluateStructuralQuality` accepts when searchable ≥ ~60% of the page's expected product count. `sourceDetector = GRID_LAYOUT`.
+2. **PDF_LAYOUT** (`pdf-layout-card-detector.ts`). Image-anchored cards (see below), each validated; a crop that validates as `multi_card_crop` is handed to `splitCompositeProductBox` (signal-position split into 2×1/1×2/2×2/3×3/…); if ≥2 sub-cards validate, they replace the composite, else it's kept as non-searchable debug. Same `evaluateStructuralQuality` gate. `sourceDetector = PDF_LAYOUT`.
+3. **HEURISTIC.** Structural tiers rejected (likely scanned/odd) → whitespace-gap splitter + `enforceHardCardRules`, gated by `evaluateHeuristicQuality`. `sourceDetector = HEURISTIC`.
+4. **VISION_BOXES_CHEAP / PREMIUM.** Heuristic bad → `VISION_DETECTOR_MODEL_CHEAP` (boxes-only); premium retry only if `VISION_USE_PREMIUM_FALLBACK=true` and cheap returned 0 boxes on a productful page.
+5. **FALLBACK.** Vision throws → use the heuristic candidates we already have. `sourceDetector = FALLBACK`.
 
-**PDF_LAYOUT detector** (`pdf-layout-extractor.ts` + `pdf-layout-card-detector.ts`): `extractPdfLayout` runs `scripts/extract_pdf_layout.py` (PyMuPDF) once per catalog via `execFile` (no shell), producing per-page text/image/drawing blocks with bboxes in **PDF points**. `detectCardsFromPdfLayout` converts points → rendered pixels (`renderedWidth / pageLayout.width`), drops header/footer/tiny/thin-bar/full-page-background blocks, then **anchors on images**: only touching/overlapping images merge (one anchor per photo), and each text attaches to its *single* nearest anchor (caption below or code beside, never bridging two anchors — this is what stops a whole column from chaining into one card). Clusters are expanded slightly, then rejected if page-like / bar / column / tiny, and deduped by IoU. A page with no product image yields no cards. Extraction failure (missing Python/PyMuPDF) resolves to `null` → every page falls back to heuristic/vision.
+**Structural extraction** (`pdf-layout-extractor.ts`): `extractPdfLayout` runs `scripts/extract_pdf_layout.py` (PyMuPDF) once per catalog via `execFile` (no shell), producing per-page text/image/drawing blocks with bboxes in **PDF points**; failure (missing Python/PyMuPDF) resolves to `null` → heuristic/vision only.
+
+**PDF_LAYOUT card detector** (`pdf-layout-card-detector.ts`): converts points → rendered pixels (`renderedWidth / pageLayout.width`), drops header/footer/tiny/thin-bar/full-page-background blocks, then **anchors on images**: only touching/overlapping images merge (one anchor per photo), and each text attaches to its *single* nearest anchor (caption below or code beside, never bridging two anchors — stops a whole column from chaining into one card). Clusters are expanded slightly, rejected if page-like / bar / column / tiny, deduped by IoU.
+
+**Debug:** `CATALOG_DEBUG_PAGES="3,4,5,…"` logs page type, signals and rendered size per listed page. Per-page logs: `[page-classifier]`, `[grid-layout]`, `[pdf-layout]`, `[pdf-layout-split]`.
 
 **Per-catalog budget**: `CATALOG_MAX_VISION_PAGES` (default 20) caps the number of vision calls per catalog. When the budget hits 0, remaining bad-heuristic pages serve heuristic candidates anyway and log `BUDGET_EXCEEDED`. This is the hard guardrail against the "$5 per PDF" failure mode.
 
@@ -87,7 +121,8 @@ In **auto** mode, per page:
 - A successful "0 boxes" response is trusted (cover pages have no products) — unless premium fallback kicks in.
 
 `sourceDetector` taxonomy:
-- `PDF_LAYOUT` — primary; cards from the PDF's real structure (no LLM)
+- `GRID_LAYOUT` — primary; product cells inferred from signal positions (no LLM)
+- `PDF_LAYOUT` — image-anchored cards from the PDF's structure (validated; no LLM)
 - `HEURISTIC` — whitespace-gap splitter, no vision call
 - `VISION_BOXES_CHEAP` / `VISION_BOXES_PREMIUM` — boxes-only vision fallback
 - `FALLBACK` — vision threw, falling back to heuristic
@@ -95,7 +130,7 @@ In **auto** mode, per page:
 
 **MVP note:** new vision candidates leave `productName`, `category`, `model`, `descriptionPt`, `originalText`, `productNamePt`, `functionGroup` as `null`. The columns are kept for old rows; UI tolerates missing values.
 
-Each page returns `stats: { decision, modelUsed, visionCallsMade, budgetRemainingBefore/After, heuristicQualityReason }`. `processCatalog` aggregates these into a per-catalog summary line (`pdfLayoutPages`/`heuristicPages`/`visionCheapPages`/`visionPremiumPages`/`fallbackPages`/`estimatedVisionCalls`). On a digital catalog most pages should resolve as `PDF_LAYOUT` — vision is the exception.
+Each page returns `stats: { decision, modelUsed, visionCallsMade, budgetRemainingBefore/After, heuristicQualityReason }`. `processCatalog` aggregates these into a per-catalog summary line (`gridLayoutPages`/`pdfLayoutPages`/`pageSkipPages`/`heuristicPages`/`visionCheapPages`/`visionPremiumPages`/`fallbackPages`/`estimatedVisionCalls`). On a digital catalog most pages should resolve as `GRID_LAYOUT`/`PDF_LAYOUT` — vision is the exception.
 
 The heuristic detector (also in `detect-product-candidates.ts`) is the same legacy card-grid splitter: row-then-column whitespace gaps → score each cell as a card.
 
@@ -103,7 +138,7 @@ The heuristic detector (also in `detect-product-candidates.ts`) is the same lega
 
 **PageAnalysis table:** the full raw vision response is persisted per page (`provider`, `model`, `rawJson`, `productsCount`, `error`) for auditing. The per-product slice is also stored on `ProductCandidate.rawVisionJson`.
 
-**Severe rejects** (force `isSearchable = false` regardless of score): `too_small`, `too_large`, `mostly_white`, `green_bar`, `orange_bar`, `color_bar`, `horizontal_bar`, `vertical_column`, `header_footer`, `empty_cell`, `too_horizontal`, `too_vertical`, `insufficient_content`, `card_too_large`, `page_like_crop`, `invalid_box`, `duplicate`, `low_confidence`, `bad_card_boundary`, `low_boundary`, `multi_card_crop`. Non-severe (`text_like`, `no_central_object`, `low_quality`) are informational.
+**Severe rejects** (force `isSearchable = false` regardless of score): `too_small`, `too_large`, `mostly_white`, `green_bar`, `orange_bar`, `color_bar`, `horizontal_bar`, `vertical_column`, `header_footer`, `empty_cell`, `too_horizontal`, `too_vertical`, `insufficient_content`, `card_too_large`, `page_like_crop`, `invalid_box`, `duplicate`, `low_confidence`, `bad_card_boundary`, `low_boundary`, `multi_card_crop`, `non_product_page`, `no_product_signal`, `grid_detection_failed`. Non-severe (`text_like`, `no_central_object`, `low_quality`) are informational.
 
 **Hard card rules** (`enforceHardCardRules`, applied to both heuristic and PDF_LAYOUT crops): a searchable crop may not be ≥ `750×1000` px (`too_large`), cover > 35% of the page area (`card_too_large`), have aspect > 3.2 (`horizontal_bar`), or trip `looksLikeMultiCardCrop` (`multi_card_crop`). `looksLikeMultiCardCrop` flags a crop ~3× taller than wide, or one with ≥2 stacked content bands separated by deep whitespace gaps — i.e. a column / grid-slab rather than one product.
 
@@ -150,8 +185,12 @@ return normalizeVector(clsToken);
 | `scripts/extract_pdf_layout.py` | PyMuPDF extractor: per-page text/image/drawing blocks with bboxes (PDF points) → JSON. Run via `python scripts/extract_pdf_layout.py in.pdf out.json` |
 | `src/features/catalog-processing/pdf-layout-extractor.ts` | `extractPdfLayout({pdfPath, outputDir})` — spawns the Python script (`execFile`, no shell), Zod-validates the JSON, returns `PdfLayoutDocument \| null` (graceful on failure). `PYTHON_BIN` selects the interpreter |
 | `src/features/catalog-processing/pdf-layout-card-detector.ts` | `detectCardsFromPdfLayout` — points→pixels, image-anchored clustering (text attaches to nearest photo), reject/dedupe → `PDF_LAYOUT` card boxes |
+| `src/features/catalog-processing/product-signals.ts` | `extractProductSignals` — codes / `R$` / `PCS-CX` / `Unid.CX` / bullets / category-words. `looksMultiProduct`, `estimateProductCount` (price/PCS-CX are the reliable per-product counters; codes are weak) |
+| `src/features/catalog-processing/page-type-classifier.ts` | `classifyCatalogPage` — cover/summary/category_grid/partial_grid/single_product/non_product/unknown from text+layout |
+| `src/features/catalog-processing/grid-layout-detector.ts` | `detectGridProductBoxes` — primary; cell boxes from signal-position row/column clustering, clamped per cell. Also `collectTextInPixelBox` |
+| `src/features/catalog-processing/composite-card-splitter.ts` | `splitCompositeProductBox` — split a multi-product box by interior signal positions |
 | `src/features/catalog-processing/render-pages.ts` | Renders PDF pages via `pdftoppm` |
-| `src/features/catalog-processing/detect-product-candidates.ts` | Detector orchestrator: `PDF_LAYOUT → HEURISTIC → vision → FALLBACK`. Also `enforceHardCardRules` / `looksLikeMultiCardCrop`. Returns `PageDetectionResult = { candidates, pageAnalysis, stats }` |
+| `src/features/catalog-processing/detect-product-candidates.ts` | Detector orchestrator: `PAGE_CLASSIFIER → GRID_LAYOUT → PDF_LAYOUT → HEURISTIC → vision → FALLBACK`. Also `validateSingleProductCrop`, `enforceHardCardRules` / `looksLikeMultiCardCrop`. Returns `PageDetectionResult = { candidates, pageAnalysis, stats }` |
 | `src/features/catalog-processing/vision-json-detector.ts` | Multimodal vision detector. `detectProductBoxesWithVision` (MVP) + `prepareVisionInputImage` (downscale) + provider helpers (anthropic/openai). `detectProductsJsonWithVision` kept @deprecated for compat. Throws `VisionDetectorUnavailableError` when env is missing |
 | `src/features/catalog-processing/product-json-schema.ts` | Zod schemas — `PageBoxesSchema` (current) + `PageAnalysisSchema` (legacy rich), and `parseVisionBoxesResponse` which accepts either shape |
 | `src/features/catalog-processing/vision-box-validator.ts` | Clamp boxes (handles normalized 0-1 coords), filter geometric outliers, `dedupeBoxesByIoU(0.65)` |
@@ -172,8 +211,9 @@ return normalizeVector(clsToken);
 ### Schema models
 
 - **Supplier** → many **Catalog**
-- **Catalog** → many **CatalogPage** + many **ProductCandidate**. Has `pdfStoragePath` pointing at the original PDF in Supabase Storage (required for reprocessing).
-- **CatalogPage** → many **ProductCandidate** (the rendered page each candidate came from)
+- **Catalog** → many **CatalogPage** + many **ProductCandidate** + many **PageProductMention**. Has `pdfStoragePath` and `pageProductCount` (page_mentions counter).
+- **CatalogPage** → many **ProductCandidate** (legacy) + many **PageProductMention** (current). Same rendered page is used as the visual result for the new search.
+- **PageProductMention** — page-level unit of intelligence. Fields: `namePt`, `originalName`, `descriptionPt`, `category`, `functionGroup`, `colors[]`, `visualAttributes[]`, `technicalAttributes[]`, `notConfuseWith[]`, `commercialUse`, `isKit`, `kitContains[]`, `confidence`, `evidenceText`, `evidenceSource` ("vision"|"pdf_text"|"both"|"manual"), `searchText`, `embedding vector(1536)`, `rawJson`. The embedding is text/semantic — independent from the DINOv2 visual embedding on ProductCandidate.
 - **ProductCandidate** — searchable image crop. Key fields:
   - `cropUrl` — image used for search/results (and for embedding when `isSearchable`)
   - `cardUrl` — surrounding card region (defaults to `cropUrl` in the MVP / vision path)
@@ -211,8 +251,22 @@ VISION_DETECTOR_MAX_IMAGE_WIDTH    # default 1280
 VISION_DETECTOR_JPEG_QUALITY       # default 75
 VISION_DETECTOR_MAX_OUTPUT_TOKENS  # default 800
 
-# PDF_LAYOUT detector (PyMuPDF)
+# Structural detector (PyMuPDF)
 PYTHON_BIN                         # python interpreter for the extractor (default 'python3')
+CATALOG_DEBUG_PAGES                # e.g. "3,4,5" — verbose per-page detector logs
+
+# Page-level strategy (page_mentions)
+CATALOG_PROCESSING_MODE            # 'page_mentions' (default) | 'legacy_crops'
+SEARCH_MODE                        # 'page_mentions' (default) | 'legacy_candidates'
+PAGE_ANALYZER_MODEL                # multimodal model for the page analyzer
+PAGE_ANALYZER_MAX_OUTPUT_TOKENS    # default 2400
+QUERY_ANALYZER_MODEL               # multimodal model for the query image
+QUERY_ANALYZER_MAX_OUTPUT_TOKENS   # default 1200
+QUERY_ANALYZER_MAX_IMAGE_WIDTH     # default 1024
+TEXT_EMBEDDING_PROVIDER            # 'openai' (default)
+TEXT_EMBEDDING_MODEL               # default 'text-embedding-3-small'
+TEXT_EMBEDDING_DIMENSIONS          # default 1536 — must match the Prisma column
+TEXT_EMBEDDING_API_KEY             # optional — falls back to OPENAI_API_KEY then VISION_DETECTOR_API_KEY
 ```
 
 **Recommended config for cheap testing:**
