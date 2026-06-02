@@ -168,6 +168,11 @@ async function processInPageMentionsMode(args: {
   let mentionCount = 0;
   let analyzedPages = 0;
   let emptyPages = 0;
+  let analyzerErrorCount = 0;
+  let embeddingErrorCount = 0;
+  let embeddedMentionCount = 0;
+  let pageVisualEmbeddingCount = 0;
+  let pageVisualEmbeddingErrorCount = 0;
 
   for (const { pageNumber, imagePath } of renderedPages) {
     try {
@@ -195,6 +200,36 @@ async function processInPageMentionsMode(args: {
       });
 
       pageCount++;
+
+      // ── Full-page DINOv2 visual embedding ────────────────────────────────
+      // Supports the hybrid visual signal in /api/search. Failure here must
+      // never abort the page: visual-only matches can't promote to high
+      // confidence anyway (the reranker enforces that), so a missing
+      // visualEmbedding just means this page is invisible to the visual
+      // branch.
+      try {
+        const pageVisualEmbedding = await generateImageEmbeddingFromPath(
+          imagePath
+        );
+        if (
+          pageVisualEmbedding.length > 0 &&
+          pageVisualEmbedding.some((v) => v !== 0)
+        ) {
+          const vec = toPgVectorLiteral(pageVisualEmbedding);
+          await prisma.$executeRaw`
+            UPDATE "CatalogPage"
+            SET "visualEmbedding" = ${vec}::vector
+            WHERE id = ${catalogPage.id}
+          `;
+          pageVisualEmbeddingCount++;
+        }
+      } catch (err) {
+        pageVisualEmbeddingErrorCount++;
+        console.error(
+          `[catalog ${catalogId}] page ${pageNumber} visualEmbedding error:`,
+          err
+        );
+      }
 
       if (!analyzerReady) continue;
 
@@ -224,6 +259,7 @@ async function processInPageMentionsMode(args: {
           pdfTextBlocks,
         });
       } catch (err) {
+        analyzerErrorCount++;
         console.error(
           `[catalog ${catalogId}] page ${pageNumber} analyzer error:`,
           err
@@ -290,6 +326,7 @@ async function processInPageMentionsMode(args: {
       try {
         embeddings = await generateTextEmbeddings(searchTexts);
       } catch (err) {
+        embeddingErrorCount++;
         console.error(
           `[catalog ${catalogId}] page ${pageNumber} embedding error:`,
           err
@@ -297,6 +334,9 @@ async function processInPageMentionsMode(args: {
       }
 
       // ── Insert mentions, then update embeddings via raw SQL ──────────────
+      // `displayOrder` mirrors the analyzer's response order — the prompt
+      // asks for left→right, top→bottom, so position in the array is the
+      // visual order of the product on the page.
       for (let i = 0; i < products.length; i++) {
         const p = products[i];
         const searchText = searchTexts[i];
@@ -308,11 +348,15 @@ async function processInPageMentionsMode(args: {
               catalogId,
               pageId: catalogPage.id,
               pageNumber,
+              displayOrder: i + 1,
               namePt: p.namePt,
               originalName: p.originalName ?? null,
               descriptionPt: p.descriptionPt ?? null,
               category: p.category ?? null,
               functionGroup: p.functionGroup ?? null,
+              brand: p.brand ?? null,
+              modelCodes: p.modelCodes,
+              aliases: p.aliases,
               colors: p.colors,
               visualAttributes: p.visualAttributes,
               technicalAttributes: p.technicalAttributes,
@@ -328,13 +372,18 @@ async function processInPageMentionsMode(args: {
             },
           });
 
-          if (embedding && embedding.length > 0 && embedding.some((v) => v !== 0)) {
+          if (
+            embedding &&
+            embedding.length > 0 &&
+            embedding.some((v) => v !== 0)
+          ) {
             const vec = toPgVectorLiteral(embedding);
             await prisma.$executeRaw`
               UPDATE "PageProductMention"
               SET embedding = ${vec}::vector
               WHERE id = ${record.id}
             `;
+            embeddedMentionCount++;
           }
 
           mentionCount++;
@@ -350,13 +399,60 @@ async function processInPageMentionsMode(args: {
     }
   }
 
+  // If every page failed at the analyzer, treat the run as a hard failure —
+  // there's nothing to search against. Throw so the outer catch flips status
+  // to FAILED with the same error message.
+  if (
+    analyzerReady &&
+    renderedPages.length > 0 &&
+    analyzedPages === 0 &&
+    analyzerErrorCount > 0
+  ) {
+    throw new Error(
+      `Nenhuma página foi analisada com sucesso (${analyzerErrorCount} falhas no analyzer).`
+    );
+  }
+
+  // Partial failures stay READY but surface a warning in Catalog.error so
+  // Rafael sees a yellow flag in the UI.
+  const warningParts: string[] = [];
+  if (analyzerErrorCount > 0) {
+    warningParts.push(
+      `${analyzerErrorCount} página${
+        analyzerErrorCount === 1 ? "" : "s"
+      } falharam no analyzer`
+    );
+  }
+  if (embeddingErrorCount > 0) {
+    warningParts.push(
+      `${embeddingErrorCount} página${
+        embeddingErrorCount === 1 ? "" : "s"
+      } tiveram erro de embedding`
+    );
+  }
+  if (pageVisualEmbeddingErrorCount > 0) {
+    warningParts.push(
+      `${pageVisualEmbeddingErrorCount} página${
+        pageVisualEmbeddingErrorCount === 1 ? "" : "s"
+      } tiveram erro de embedding visual`
+    );
+  }
+  const errorMessage =
+    warningParts.length > 0
+      ? `Processado com avisos: ${warningParts.join("; ")}.`
+      : null;
+
   await prisma.catalog.update({
     where: { id: catalogId },
-    data: { pageCount, pageProductCount: mentionCount },
+    data: {
+      pageCount,
+      pageProductCount: mentionCount,
+      error: errorMessage,
+    },
   });
 
   console.log(
-    `[catalog ${catalogId}] summary(page_mentions): totalPages=${pageCount} analyzedPages=${analyzedPages} emptyPages=${emptyPages} mentions=${mentionCount}`
+    `[catalog ${catalogId}] summary(page_mentions): totalPages=${pageCount} analyzedPages=${analyzedPages} emptyPages=${emptyPages} mentions=${mentionCount} embeddedMentions=${embeddedMentionCount} pageVisualEmbeddings=${pageVisualEmbeddingCount} analyzerErrors=${analyzerErrorCount} embeddingErrors=${embeddingErrorCount} pageVisualEmbeddingErrors=${pageVisualEmbeddingErrorCount}`
   );
 }
 

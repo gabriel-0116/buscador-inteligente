@@ -101,9 +101,13 @@ export default async function CatalogPage({ params }: Props) {
           id: true,
           pageId: true,
           pageNumber: true,
+          displayOrder: true,
           namePt: true,
           functionGroup: true,
           category: true,
+          brand: true,
+          modelCodes: true,
+          aliases: true,
           colors: true,
           isKit: true,
           kitContains: true,
@@ -111,7 +115,14 @@ export default async function CatalogPage({ params }: Props) {
           evidenceText: true,
           evidenceSource: true,
         },
-        orderBy: [{ pageNumber: "asc" }, { confidence: "desc" }],
+        // Visual order first (left→right, top→bottom). Legacy rows with
+        // displayOrder = NULL fall to the bottom; confidence is the
+        // tiebreaker for those.
+        orderBy: [
+          { pageNumber: "asc" },
+          { displayOrder: "asc" },
+          { confidence: "desc" },
+        ],
       },
       candidates: {
         select: {
@@ -307,8 +318,8 @@ export default async function CatalogPage({ params }: Props) {
                           )}
                         </p>
                         {mentions.length > 0 && (
-                          <ul className="mt-1 flex flex-col gap-1 text-xs">
-                            {mentions.slice(0, 8).map((m) => (
+                          <ol className="mt-1 flex flex-col gap-1 text-xs">
+                            {mentions.slice(0, 8).map((m, idx) => (
                               <li
                                 key={m.id}
                                 className="border-l-2 border-emerald-400 pl-2"
@@ -317,6 +328,9 @@ export default async function CatalogPage({ params }: Props) {
                                   className="font-medium leading-tight"
                                   title={m.namePt}
                                 >
+                                  <span className="text-muted-foreground mr-1 font-mono text-[11px]">
+                                    {idx + 1}.
+                                  </span>
                                   {m.namePt}
                                   {m.isKit && (
                                     <span className="ml-1 rounded bg-indigo-100 px-1 text-[10px] text-indigo-700">
@@ -324,15 +338,22 @@ export default async function CatalogPage({ params }: Props) {
                                     </span>
                                   )}
                                 </p>
+                                {(m.brand || m.modelCodes.length > 0) && (
+                                  <p className="text-foreground/80 truncate pl-5 font-mono text-[11px]">
+                                    {[m.brand, m.modelCodes.join(", ")]
+                                      .filter(Boolean)
+                                      .join(" · ")}
+                                  </p>
+                                )}
                                 {(m.functionGroup || m.category) && (
-                                  <p className="text-muted-foreground truncate">
+                                  <p className="text-muted-foreground truncate pl-5">
                                     {[m.category, m.functionGroup]
                                       .filter(Boolean)
                                       .join(" · ")}
                                   </p>
                                 )}
                                 {m.colors.length > 0 && (
-                                  <p className="text-muted-foreground">
+                                  <p className="text-muted-foreground pl-5">
                                     {m.colors.join(", ")}
                                   </p>
                                 )}
@@ -343,7 +364,7 @@ export default async function CatalogPage({ params }: Props) {
                                 +{mentions.length - 8} outros
                               </li>
                             )}
-                          </ul>
+                          </ol>
                         )}
                       </div>
                     </div>
@@ -488,17 +509,11 @@ export default async function CatalogPage({ params }: Props) {
               );
             };
 
+            // page_mentions mode: legacy candidate rows don't exist for new
+            // catalogs. Hide the whole section instead of showing an empty
+            // "Candidatos extraídos (0)" block — it's just visual noise.
             if (catalog.candidates.length === 0) {
-              return (
-                <section className="flex flex-col gap-3">
-                  <h2 className="text-xl font-semibold">
-                    Candidatos extraídos (0)
-                  </h2>
-                  <p className="text-muted-foreground py-8 text-center">
-                    Nenhum candidato detectado. Tente reprocessar.
-                  </p>
-                </section>
-              );
+              return null;
             }
 
             return (

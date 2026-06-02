@@ -64,6 +64,10 @@ model CatalogPage {
   imageUrl   String
   width      Int
   height     Int
+  // Full-page DINOv2 (768) embedding — supports the hybrid visual signal in
+  // page_mentions search. Never the primary signal: visual-only matches are
+  // capped at "low confidence" by the reranker.
+  visualEmbedding Unsupported("vector(768)")?
   createdAt  DateTime @default(now())
 
   catalog         Catalog              @relation(fields: [catalogId], references: [id], onDelete: Cascade)
@@ -153,12 +157,23 @@ model PageProductMention {
   pageId    String
 
   pageNumber Int
+  // Visual order of the product on the page (1-based, left→right, top→bottom).
+  // Set by process-catalog from the analyzer's response order. NULL on legacy
+  // rows; sorts last with `ORDER BY ... NULLS LAST` semantics in Postgres ASC.
+  displayOrder Int?
 
   namePt        String
   originalName  String?
   descriptionPt String?
   category      String?
   functionGroup String?
+
+  // Strong textual signals — see atualizacao.md. The analyzer extracts these
+  // explicitly so they outrank the pt-BR translation: same modelCode → same
+  // product, regardless of how the catalog spells it.
+  brand      String?
+  modelCodes String[] @default([])
+  aliases    String[] @default([])
 
   colors              String[]
   visualAttributes    String[]
@@ -186,9 +201,11 @@ model PageProductMention {
 
   @@index([catalogId])
   @@index([pageId])
+  @@index([pageId, displayOrder])
   @@index([functionGroup])
   @@index([category])
   @@index([pageNumber])
+  @@index([brand])
 }
 
 enum CandidateSourceType {

@@ -58,7 +58,11 @@ export async function POST(_request: Request, { params }: Params) {
     await supabaseAdmin.storage.from("product-images").remove(uniquePaths);
   }
 
-  // ── Delete old DB records (pages + candidates) ───────────────────────────
+  // ── Delete old DB records ────────────────────────────────────────────────
+  // CatalogPage cascades to ProductCandidate AND PageProductMention, but
+  // delete the children explicitly first to keep the intent obvious and
+  // survive any future relation change.
+  await prisma.pageProductMention.deleteMany({ where: { catalogId } });
   await prisma.productCandidate.deleteMany({ where: { catalogId } });
   await prisma.catalogPage.deleteMany({ where: { catalogId } });
 
@@ -70,6 +74,7 @@ export async function POST(_request: Request, { params }: Params) {
       error: null,
       pageCount: null,
       candidateCount: null,
+      pageProductCount: null,
     },
   });
 

@@ -52,6 +52,11 @@ export const ImageQueryProfileSchema = z.object({
   mainProductNamePt: trimmedNonEmpty,
   functionGroup: trimmedNonEmpty,
   category: optionalString,
+  // Strong signals: brand + code + any visible text help match catalog rows
+  // by literal substring, regardless of language. See atualizacao.md Part 2.
+  brand: optionalString,
+  modelCodes: stringArray.default([]),
+  visibleText: stringArray.default([]),
   colors: stringArray.default([]),
   visualAttributes: stringArray.default([]),
   technicalAttributes: stringArray.default([]),
@@ -79,7 +84,7 @@ REGRAS DURAS:
 - Foque no PRODUTO PRINCIPAL da imagem.
 - Não descreva o cenário ao redor.
 - Não invente atributos que não dá para confirmar.
-- Identifique a função comercial (camera_infantil, antena, carregador_usb, fone_bluetooth, ring_light, …).
+- Identifique a função comercial em snake_case (camera_infantil, antena, carregador_usb, fone_bluetooth, ring_light, barbeador_eletrico, maquina_cortar_cabelo, …).
 - Liste os produtos que VISUALMENTE PARECEM com este mas NÃO devem ser confundidos comercialmente (mustNotMatch).
   Exemplos:
     - antena com cabo preto -> mustNotMatch: cabo USB, cabo HDMI, cabo de energia, carregador, adaptador, fone.
@@ -87,12 +92,40 @@ REGRAS DURAS:
     - carregador de tomada -> mustNotMatch: cabo USB, adaptador sem função de carregador.
 - Se houver dúvida, escreva em "ambiguityNotes".
 
-Responda APENAS com JSON neste schema:
+SINAIS TEXTUAIS FORTES (obrigatório se visível):
+- "brand": marca visível na embalagem/produto (ex.: "Kemei", "Xiaomi", "Anker"). Null se não houver.
+- "modelCodes": códigos/modelos/SKUs claramente legíveis (ex.: ["KM-7103"]). Mantenha hífens originais.
+- "visibleText": qualquer texto visível na imagem em qualquer língua — útil para casar com "originalName"/"evidenceText" do catálogo (ex.: ["Kemei", "KM-7103", "USB", "3 em 1"]).
+- Não invente. Se não consegue LER, não coloque.
+
+Exemplo (imagem de embalagem Kemei KM-7103):
+
+{
+  "mainProductNamePt": "Barbeador elétrico 3 em 1",
+  "functionGroup": "barbeador_eletrico",
+  "category": "Cuidados pessoais",
+  "brand": "Kemei",
+  "modelCodes": ["KM-7103"],
+  "visibleText": ["Kemei", "KM-7103", "USB", "3 em 1"],
+  "colors": ["dourado", "roxo"],
+  "visualAttributes": ["formato compacto", "cabeças intercambiáveis"],
+  "technicalAttributes": ["USB", "3 em 1"],
+  "commercialUse": "barbear pelos do rosto",
+  "possibleSynonyms": ["barbeador", "máquina de barbear", "electric shaver"],
+  "mustNotMatch": ["aparador de nariz", "cabo USB", "carregador USB"],
+  "ambiguityNotes": [],
+  "confidence": 0.9
+}
+
+Responda APENAS com JSON neste schema (preencha brand/modelCodes/visibleText quando existirem):
 
 {
   "mainProductNamePt": "...",
   "functionGroup": "snake_case",
   "category": "...",
+  "brand": "..." | null,
+  "modelCodes": ["..."],
+  "visibleText": ["..."],
   "colors": ["..."],
   "visualAttributes": ["..."],
   "technicalAttributes": ["..."],
@@ -309,8 +342,17 @@ export async function analyzeImageQueryProfileFromFile(
 // ── Query searchText helper ─────────────────────────────────────────────────
 
 export function buildImageQuerySearchText(profile: ImageQueryProfile): string {
+  // Mirror the catalog-side searchText shape so the embedding distance is
+  // computed on the same "kind" of blob.
   const parts: Array<string | null | undefined> = [
     profile.mainProductNamePt,
+    profile.brand ? `marca: ${profile.brand}` : null,
+    profile.modelCodes.length
+      ? `modelos/códigos: ${profile.modelCodes.join(", ")}`
+      : null,
+    profile.visibleText.length
+      ? `texto visível: ${profile.visibleText.join(", ")}`
+      : null,
     `função: ${profile.functionGroup}`,
     profile.category,
     profile.commercialUse ? `uso: ${profile.commercialUse}` : null,

@@ -29,6 +29,13 @@ export type PageSearchResult = {
   confidence: MatchConfidence;
   score: number;
   reason: string;
+  // Hybrid signals.
+  semanticScore?: number;
+  visualSimilarity?: number;
+  matchedByVisualPage?: boolean;
+  // Sidebar metadata surfaced for the user.
+  matchedBrand?: string | null;
+  matchedModelCodes?: string[];
   otherMatches: Array<{
     mentionId: string;
     productName: string;
@@ -43,6 +50,9 @@ export type ImageQueryProfileLite = {
   functionGroup: string;
   category?: string | null;
   colors?: string[];
+  brand?: string | null;
+  modelCodes?: string[];
+  visibleText?: string[];
   mustNotMatch?: string[];
   confidence?: number;
 };
@@ -118,6 +128,19 @@ export function PageSearchResults({
               <span className="font-mono">{profile.functionGroup}</span>
             </span>
           </p>
+          {(profile.brand ||
+            (profile.modelCodes && profile.modelCodes.length > 0)) && (
+            <p className="font-mono text-xs">
+              {[profile.brand, profile.modelCodes?.join(", ")]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )}
+          {profile.visibleText && profile.visibleText.length > 0 && (
+            <p className="text-muted-foreground text-xs">
+              Texto visível na imagem: {profile.visibleText.join(", ")}
+            </p>
+          )}
           {profile.mustNotMatch && profile.mustNotMatch.length > 0 && (
             <p className="text-muted-foreground text-xs">
               Não confundir com: {profile.mustNotMatch.join(", ")}
@@ -158,6 +181,11 @@ export function PageSearchResults({
                 >
                   Confiança {confidenceLabel[r.confidence]}
                 </span>
+                {r.matchedByVisualPage && (
+                  <span className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800">
+                    visual
+                  </span>
+                )}
               </div>
 
               <div>
@@ -170,6 +198,14 @@ export function PageSearchResults({
                 >
                   {r.matchedProductName}
                 </p>
+                {(r.matchedBrand ||
+                  (r.matchedModelCodes && r.matchedModelCodes.length > 0)) && (
+                  <p className="text-foreground/80 font-mono text-xs">
+                    {[r.matchedBrand, r.matchedModelCodes?.join(", ")]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                )}
                 {r.matchedFunctionGroup && (
                   <p className="text-muted-foreground font-mono text-xs">
                     {r.matchedFunctionGroup}
@@ -214,6 +250,15 @@ export function PageSearchResults({
                     ))}
                   </ul>
                 </details>
+              )}
+
+              {r.visualSimilarity != null && (
+                <p className="text-muted-foreground text-xs">
+                  Similaridade visual da página:{" "}
+                  <strong className="text-foreground">
+                    {Math.round(r.visualSimilarity * 100)}%
+                  </strong>
+                </p>
               )}
 
               <div className="mt-1 flex justify-between gap-2 text-xs">

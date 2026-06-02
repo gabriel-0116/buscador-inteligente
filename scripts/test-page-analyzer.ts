@@ -118,13 +118,23 @@ async function main() {
       console.log(`provider=${result.provider} model=${result.model}`);
       console.log(`hasProducts=${hasProducts} products=${products.length}`);
       if (pageSummary) console.log(`summary=${pageSummary}`);
-      for (const p of products) {
+      products.forEach((p, i) => {
+        const order = i + 1;
         const kit = p.isKit ? " [KIT]" : "";
         const cols = p.colors.length ? ` colors=${p.colors.join("/")}` : "";
+        const brand = p.brand ? ` brand=${p.brand}` : "";
+        const codes = p.modelCodes.length
+          ? ` codes=${p.modelCodes.join(",")}`
+          : "";
+        const aliases = p.aliases.length
+          ? ` aliases=${p.aliases.slice(0, 4).join("|")}${
+              p.aliases.length > 4 ? `+${p.aliases.length - 4}` : ""
+            }`
+          : "";
         console.log(
-          `- ${p.namePt}${kit} | functionGroup=${p.functionGroup} | confidence=${p.confidence.toFixed(2)}${cols}`
+          `${order}. ${p.namePt}${kit}${brand}${codes} | functionGroup=${p.functionGroup} | confidence=${p.confidence.toFixed(2)}${cols}${aliases}`
         );
-      }
+      });
 
       const debugPath = join(tmpdir(), `page-analyzer-${pageNumber}.json`);
       await writeFile(

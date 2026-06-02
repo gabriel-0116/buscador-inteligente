@@ -36,8 +36,21 @@ export async function POST(request: Request) {
 
   if (mode === "page_mentions") {
     try {
-      const { profile } = await analyzeImageQueryProfileFromFile(image);
-      const results = await searchPagesByQueryProfile({ profile });
+      // Run the structured profile (multimodal) and the DINOv2 visual
+      // embedding in parallel — both consume the same File but are
+      // independent calls. Visual is the *supporting* signal and is allowed
+      // to fail without aborting the search.
+      const [{ profile }, queryVisualEmbedding] = await Promise.all([
+        analyzeImageQueryProfileFromFile(image),
+        generateImageEmbeddingFromFile(image).catch((err) => {
+          console.warn("[search] visual embedding failed:", err);
+          return undefined as number[] | undefined;
+        }),
+      ]);
+      const results = await searchPagesByQueryProfile({
+        profile,
+        queryVisualEmbedding,
+      });
       return NextResponse.json({ mode, profile, results });
     } catch (err) {
       console.error("[search] page_mentions failed:", err);

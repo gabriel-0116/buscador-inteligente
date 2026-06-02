@@ -50,10 +50,13 @@ export async function DELETE(_request: Request, { params }: Params) {
 
   const catalog = await prisma.catalog.findUnique({
     where: { id: catalogId },
-    include: {
+    select: {
+      pdfStoragePath: true,
       images: { select: { imageUrl: true } },
       pages: { select: { imageUrl: true } },
-      candidates: { select: { cropUrl: true, originalUrl: true } },
+      candidates: {
+        select: { cropUrl: true, originalUrl: true, cardUrl: true },
+      },
     },
   });
 
@@ -61,23 +64,30 @@ export async function DELETE(_request: Request, { params }: Params) {
     return NextResponse.json({ error: "Catálogo não encontrado" }, { status: 404 });
   }
 
-  // Collect all storage paths to delete
+  // Public storage URLs are converted back to bucket-relative paths.
+  // `pdfStoragePath` is already a bucket-relative path (e.g. "<id>/original/catalog.pdf"),
+  // so it goes in raw without `pathFromUrl`.
   const pathFromUrl = (url: string) => {
     try {
-      return new URL(url).pathname.replace(/^\/storage\/v1\/object\/public\/product-images\//, "");
+      return new URL(url).pathname.replace(
+        /^\/storage\/v1\/object\/public\/product-images\//,
+        ""
+      );
     } catch {
       return null;
     }
   };
 
   const allPaths = [
+    catalog.pdfStoragePath ?? null,
     ...catalog.images.map((i) => pathFromUrl(i.imageUrl)),
     ...catalog.pages.map((p) => pathFromUrl(p.imageUrl)),
     ...catalog.candidates.flatMap((c) => [
       pathFromUrl(c.cropUrl),
       pathFromUrl(c.originalUrl),
+      c.cardUrl ? pathFromUrl(c.cardUrl) : null,
     ]),
-  ].filter((p): p is string => p !== null);
+  ].filter((p): p is string => p !== null && p.length > 0);
 
   const uniquePaths = [...new Set(allPaths)];
   if (uniquePaths.length > 0) {
