@@ -10,8 +10,8 @@ import {
   mediaTypeFromPath,
   resolveProviderAndModel,
   VisionDetectorUnavailableError,
+  VisionJsonParseError,
 } from "@/features/catalog-processing/vision-json-detector";
-import { VisionJsonParseError } from "@/features/catalog-processing/product-json-schema";
 
 // ── Image → structured query profile ─────────────────────────────────────────
 //
@@ -216,8 +216,7 @@ export function getQueryAnalyzerModel(): string | undefined {
   return (
     process.env.QUERY_ANALYZER_MODEL ||
     process.env.PAGE_ANALYZER_MODEL ||
-    process.env.VISION_DETECTOR_MODEL_CHEAP ||
-    process.env.VISION_DETECTOR_MODEL
+    process.env.VISION_DETECTOR_MODEL_CHEAP
   );
 }
 

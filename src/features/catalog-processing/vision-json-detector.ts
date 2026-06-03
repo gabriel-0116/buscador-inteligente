@@ -1,22 +1,16 @@
-import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import sharp from "sharp";
-import {
-  parseVisionBoxesResponse,
-  parseVisionJsonResponse,
-  type PageProduct,
-  type VisionBox,
-} from "./product-json-schema";
 
-// ── Multimodal vision detector (boxes-only MVP) ─────────────────────────────
+// ── Multimodal provider plumbing ────────────────────────────────────────────
 //
-// The MVP only needs *bounding boxes*. We ask the model for the smallest
-// JSON we can get away with, and the page is downscaled to a cheap JPEG
-// before being sent over the wire. Coordinates returned by the model are
-// in the downscaled image; the orchestrator rescales them back to the
-// original page before cropping.
+// Provider call + image-prep primitives shared by the page analyzer and the
+// query-image analyzer. No detector cascade anymore — that lived here in a
+// previous life and was deleted along with `detect-product-candidates`.
+//
+// File name is preserved (vs. `multimodal-provider.ts` etc.) so existing
+// imports keep resolving; rename can happen in a separate, isolated commit.
 
 export class VisionDetectorUnavailableError extends Error {
   constructor(message: string) {
@@ -25,43 +19,23 @@ export class VisionDetectorUnavailableError extends Error {
   }
 }
 
-export type VisionMode = "always" | "auto" | "off";
-
-export function getVisionMode(): VisionMode {
-  const raw = process.env.VISION_DETECTOR_MODE?.toLowerCase();
-  if (raw === "always" || raw === "off" || raw === "auto") return raw;
-  return "auto";
+// Raised when a multimodal response can't be parsed as the expected JSON.
+// Kept here (instead of a separate `product-json-schema.ts`) because every
+// caller imports it alongside the provider primitives.
+export class VisionJsonParseError extends Error {
+  constructor(
+    message: string,
+    public readonly raw: string,
+    public readonly cause?: unknown
+  ) {
+    super(message);
+    this.name = "VisionJsonParseError";
+  }
 }
 
-export function getCheapVisionModel(): string | undefined {
-  return (
-    process.env.VISION_DETECTOR_MODEL_CHEAP || process.env.VISION_DETECTOR_MODEL
-  );
-}
+// ── Env helpers (only what the page/query analyzers actually use) ───────────
 
-export function getPremiumVisionModel(): string | undefined {
-  return (
-    process.env.VISION_DETECTOR_MODEL_PREMIUM ||
-    process.env.VISION_DETECTOR_MODEL
-  );
-}
-
-export function isPremiumFallbackEnabled(): boolean {
-  return (
-    (process.env.VISION_USE_PREMIUM_FALLBACK || "").toLowerCase().trim() ===
-    "true"
-  );
-}
-
-export function getMaxVisionPagesPerCatalog(): number {
-  const raw = process.env.CATALOG_MAX_VISION_PAGES;
-  if (!raw) return 20;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 0) return 20;
-  return n;
-}
-
-export function getMaxVisionImageWidth(): number {
+function getMaxVisionImageWidth(): number {
   const raw = process.env.VISION_DETECTOR_MAX_IMAGE_WIDTH;
   if (!raw) return 1280;
   const n = Number.parseInt(raw, 10);
@@ -69,7 +43,7 @@ export function getMaxVisionImageWidth(): number {
   return n;
 }
 
-export function getVisionJpegQuality(): number {
+function getVisionJpegQuality(): number {
   const raw = process.env.VISION_DETECTOR_JPEG_QUALITY;
   if (!raw) return 75;
   const n = Number.parseInt(raw, 10);
@@ -77,28 +51,17 @@ export function getVisionJpegQuality(): number {
   return n;
 }
 
-export function getMaxVisionOutputTokens(): number {
-  const raw = process.env.VISION_DETECTOR_MAX_OUTPUT_TOKENS;
-  if (!raw) return 800;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < 100) return 800;
-  return n;
-}
-
 // ── prepareVisionInputImage ─────────────────────────────────────────────────
 //
-// Generates a temporary JPEG (max width, quality from env) and reports the
-// scale factors so the caller can map model coordinates back to the
-// original page coordinates.
-//
-// IMPORTANT: the downscaled image is for the model only. Cropping must
-// always be done on the original full-resolution page.
+// Downscales the page to a JPEG and reports the scale factors so the caller
+// can map model coordinates back to original page coordinates if it ever
+// needs to (the page analyzer doesn't — it just needs the cheaper input).
 
 export type PreparedVisionImage = {
   imagePath: string;
   width: number;
   height: number;
-  scaleX: number; // multiply downscaled X by scaleX → original X
+  scaleX: number;
   scaleY: number;
 };
 
@@ -139,83 +102,36 @@ export async function prepareVisionInputImage(args: {
   };
 }
 
-// ── Prompts ─────────────────────────────────────────────────────────────────
-//
-// Boxes-only prompt — short, no metadata, no translation, no classification.
-
-function buildBoxesPrompt(args: {
-  pageNumber: number;
-  pageWidth: number;
-  pageHeight: number;
-}): string {
-  return `Você está analisando uma página renderizada de um catálogo de fornecedor.
-
-A imagem tem ${args.pageWidth} pixels de largura e ${args.pageHeight} pixels de altura.
-Página: ${args.pageNumber}.
-
-Sua tarefa é detectar os cards/produtos vendidos nesta página.
-
-Retorne SOMENTE JSON válido, sem markdown e sem explicação:
-
-{
-  "pageNumber": ${args.pageNumber},
-  "boxes": [
-    { "x": number, "y": number, "width": number, "height": number, "confidence": number }
-  ]
-}
-
-Regras:
-- Cada produto/card comercial deve virar uma box separada.
-- Não junte vários produtos na mesma box se eles aparecem separados.
-- Ignore cabeçalho, rodapé, logo do catálogo, número da página, faixas decorativas e espaços vazios.
-- Se a página tiver uma grade 3x3, retorne 9 boxes.
-- Se tiver 2 produtos, retorne 2 boxes.
-- Se a página não tiver produtos, retorne "boxes": [].
-- A box deve cobrir o card/produto completo o suficiente para busca visual.
-- Não tente descrever o produto.
-- Não extraia texto.
-- Não classifique categoria.
-- Não traduza nada.
-- As coordenadas devem estar em pixels da imagem recebida.
-- Confidence deve estar entre 0 e 1.
-
-Responda apenas com JSON.`;
-}
-
-// Legacy rich-metadata prompt — kept only as long as the deprecated function
-// below exists. Not used by the MVP pipeline.
-function buildLegacyRichPrompt(args: {
-  pageNumber: number;
-  pageWidth: number;
-  pageHeight: number;
-}): string {
-  return `Você está analisando uma página renderizada de um catálogo de fornecedor.
-
-A imagem tem ${args.pageWidth} pixels de largura e ${args.pageHeight} pixels de altura.
-Esta é a página número ${args.pageNumber} do catálogo.
-
-Sua tarefa é identificar TODOS os produtos comerciais vendidos nesta página.
-
-Retorne SOMENTE JSON válido, sem markdown, sem explicação.
-
-{
-  "pageNumber": ${args.pageNumber},
-  "products": [
-    {
-      "box": { "x": number, "y": number, "width": number, "height": number },
-      "confidence": number
-    }
-  ]
-}
-
-Responda APENAS com o objeto JSON, nada mais.`;
-}
-
 export function mediaTypeFromPath(path: string): "image/jpeg" | "image/png" {
   const ext = extname(path).toLowerCase();
   if (ext === ".png") return "image/png";
   return "image/jpeg";
 }
+
+// ── Provider selection ─────────────────────────────────────────────────────
+
+export function resolveProviderAndModel(model: string): {
+  provider: "anthropic" | "openai";
+  apiKey: string;
+  model: string;
+} {
+  const provider = process.env.VISION_DETECTOR_PROVIDER?.toLowerCase();
+  const apiKey = process.env.VISION_DETECTOR_API_KEY;
+
+  if (!provider || !apiKey || !model) {
+    throw new VisionDetectorUnavailableError(
+      "VISION_DETECTOR_PROVIDER, VISION_DETECTOR_API_KEY and a model (PAGE_ANALYZER_MODEL / QUERY_ANALYZER_MODEL / VISION_DETECTOR_MODEL_CHEAP) must all be set"
+    );
+  }
+  if (provider !== "anthropic" && provider !== "openai") {
+    throw new VisionDetectorUnavailableError(
+      `Unsupported VISION_DETECTOR_PROVIDER: ${provider} (supported: anthropic, openai)`
+    );
+  }
+  return { provider, apiKey, model };
+}
+
+// ── HTTP plumbing ──────────────────────────────────────────────────────────
 
 async function fetchWithTimeout(
   url: string,
@@ -239,6 +155,8 @@ type ProviderCallResult = {
     totalTokens?: number;
   };
 };
+
+export type VisionProviderUsage = ProviderCallResult["usage"];
 
 // ── Provider: Anthropic ─────────────────────────────────────────────────────
 
@@ -373,45 +291,6 @@ async function callOpenAI(args: {
   };
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
-
-export function isVisionDetectorConfigured(): boolean {
-  return Boolean(
-    process.env.VISION_DETECTOR_PROVIDER &&
-    process.env.VISION_DETECTOR_API_KEY &&
-    (process.env.VISION_DETECTOR_MODEL_CHEAP ||
-      process.env.VISION_DETECTOR_MODEL_PREMIUM ||
-      process.env.VISION_DETECTOR_MODEL)
-  );
-}
-
-export function resolveProviderAndModel(modelOverride?: string): {
-  provider: "anthropic" | "openai";
-  apiKey: string;
-  model: string;
-} {
-  const provider = process.env.VISION_DETECTOR_PROVIDER?.toLowerCase();
-  const apiKey = process.env.VISION_DETECTOR_API_KEY;
-  const model =
-    modelOverride ||
-    process.env.VISION_DETECTOR_MODEL_CHEAP ||
-    process.env.VISION_DETECTOR_MODEL;
-
-  if (!provider || !apiKey || !model) {
-    throw new VisionDetectorUnavailableError(
-      "VISION_DETECTOR_PROVIDER, VISION_DETECTOR_API_KEY and a model (VISION_DETECTOR_MODEL_CHEAP/PREMIUM or VISION_DETECTOR_MODEL) must all be set"
-    );
-  }
-  if (provider !== "anthropic" && provider !== "openai") {
-    throw new VisionDetectorUnavailableError(
-      `Unsupported VISION_DETECTOR_PROVIDER: ${provider} (supported: anthropic, openai)`
-    );
-  }
-  return { provider, apiKey, model };
-}
-
-export type VisionProviderUsage = ProviderCallResult["usage"];
-
 export async function callVisionProvider(args: {
   provider: "anthropic" | "openai";
   apiKey: string;
@@ -454,131 +333,4 @@ export function logVisionUsage(args: {
   console.log(
     `[${tag}] page ${args.pageNumber} provider=${args.provider} model=${args.model} input=${inputTokens ?? "?"} output=${outputTokens ?? "?"} total=${totalTokens ?? "?"}`
   );
-}
-
-// ── Boxes-only detector (MVP) ───────────────────────────────────────────────
-
-export type VisionBoxesResult = {
-  provider: string;
-  model: string;
-  rawJson: unknown;
-  rawText: string;
-  boxes: VisionBox[];
-  usage?: {
-    inputTokens?: number;
-    outputTokens?: number;
-    totalTokens?: number;
-  };
-};
-
-/**
- * Sends a (downscaled) page to the multimodal model and asks for bounding
- * boxes only. Returns boxes in *image-input* coordinates — the caller is
- * responsible for scaling them back to the original page.
- */
-export async function detectProductBoxesWithVision(args: {
-  pageImagePath: string; // path to the image you actually send to the model
-  pageNumber: number;
-  pageWidth: number; // width of the image you send to the model
-  pageHeight: number; // height of the image you send to the model
-  modelOverride?: string;
-}): Promise<VisionBoxesResult> {
-  const { provider, apiKey, model } = resolveProviderAndModel(
-    args.modelOverride
-  );
-
-  const imageBuffer = await readFile(args.pageImagePath);
-  const imageBase64 = imageBuffer.toString("base64");
-  const mediaType = mediaTypeFromPath(args.pageImagePath);
-  const maxTokens = getMaxVisionOutputTokens();
-
-  const prompt = buildBoxesPrompt({
-    pageNumber: args.pageNumber,
-    pageWidth: args.pageWidth,
-    pageHeight: args.pageHeight,
-  });
-
-  const { text, usage } = await callVisionProvider({
-    provider,
-    apiKey,
-    model,
-    imageBase64,
-    mediaType,
-    prompt,
-    maxTokens,
-  });
-
-  logVisionUsage({ provider, model, pageNumber: args.pageNumber, usage });
-
-  const parsed = parseVisionBoxesResponse(text);
-
-  return {
-    provider,
-    model,
-    rawJson: parsed,
-    rawText: text,
-    boxes: parsed.boxes,
-    usage,
-  };
-}
-
-// ── Legacy rich-metadata detector (deprecated) ──────────────────────────────
-//
-// Kept temporarily so existing callers still compile. New code should use
-// `detectProductBoxesWithVision`. This function still hits the API and
-// returns product[].box; it just uses a shorter prompt to avoid the old
-// expensive rich-metadata response.
-
-export type VisionDetectorResult = {
-  provider: string;
-  model: string;
-  rawJson: unknown;
-  rawText: string;
-  products: PageProduct[];
-};
-
-/** @deprecated Use `detectProductBoxesWithVision`. */
-export async function detectProductsJsonWithVision(args: {
-  pageImagePath: string;
-  pageNumber: number;
-  pageWidth: number;
-  pageHeight: number;
-  modelOverride?: string;
-}): Promise<VisionDetectorResult> {
-  const { provider, apiKey, model } = resolveProviderAndModel(
-    args.modelOverride
-  );
-
-  const imageBuffer = await readFile(args.pageImagePath);
-  const imageBase64 = imageBuffer.toString("base64");
-  const mediaType = mediaTypeFromPath(args.pageImagePath);
-  const maxTokens = getMaxVisionOutputTokens();
-
-  const prompt = buildLegacyRichPrompt({
-    pageNumber: args.pageNumber,
-    pageWidth: args.pageWidth,
-    pageHeight: args.pageHeight,
-  });
-
-  const { text, usage } = await callVisionProvider({
-    provider,
-    apiKey,
-    model,
-    imageBase64,
-    mediaType,
-    prompt,
-    maxTokens,
-  });
-
-  logVisionUsage({ provider, model, pageNumber: args.pageNumber, usage });
-
-  const parsed = parseVisionJsonResponse(text);
-
-  return {
-    provider,
-    model,
-    rawJson: parsed,
-    rawText: text,
-    products: parsed.products,
-  };
 }

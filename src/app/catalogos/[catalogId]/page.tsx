@@ -21,64 +21,6 @@ const statusVariant: Record<string, "default" | "secondary" | "destructive"> = {
   FAILED: "destructive",
 };
 
-const rejectLabel: Record<string, string> = {
-  too_small: "muito pequeno",
-  too_large: "muito grande",
-  too_horizontal: "muito horizontal",
-  too_vertical: "muito vertical",
-  mostly_white: "quase branco",
-  green_bar: "faixa verde",
-  green_dominant: "verde dominante",
-  orange_bar: "faixa laranja",
-  color_bar: "faixa colorida",
-  horizontal_bar: "barra horizontal",
-  vertical_column: "coluna vertical",
-  header_footer: "cabeçalho/rodapé",
-  empty_cell: "célula vazia",
-  insufficient_content: "sem conteúdo",
-  card_too_large: "card inteiro",
-  page_like_crop: "página inteira",
-  text_like: "texto/tabela",
-  no_central_object: "sem objeto central",
-  low_quality: "baixa qualidade",
-  invalid_box: "box inválido",
-  invalid_json: "JSON inválido",
-  duplicate: "duplicado",
-  low_confidence: "confiança baixa",
-  bad_card_boundary: "borda contaminada",
-  low_boundary: "borda fraca",
-  multi_card_crop: "vários cards",
-  non_product_page: "página ignorada",
-  no_product_signal: "sem sinal de produto",
-  grid_detection_failed: "grade não detectada",
-  no_products_detected: "sem produtos detectados",
-  fallback_used: "fallback heurístico",
-};
-
-const detectorLabel: Record<string, string> = {
-  GRID_LAYOUT: "grid layout",
-  PDF_LAYOUT: "pdf layout",
-  VISION_JSON: "vision (legado)",
-  VISION_JSON_CHEAP: "vision JSON (legado)",
-  VISION_JSON_PREMIUM: "vision JSON premium (legado)",
-  VISION_BOXES_CHEAP: "vision boxes",
-  VISION_BOXES_PREMIUM: "vision premium",
-  HEURISTIC: "heurístico",
-  FALLBACK: "fallback",
-};
-
-const detectorBadgeClass: Record<string, string> = {
-  GRID_LAYOUT: "bg-teal-100 text-teal-700",
-  PDF_LAYOUT: "bg-emerald-100 text-emerald-700",
-  VISION_JSON: "bg-blue-100 text-blue-700",
-  VISION_JSON_CHEAP: "bg-blue-100 text-blue-700",
-  VISION_JSON_PREMIUM: "bg-blue-100 text-blue-700",
-  VISION_BOXES_CHEAP: "bg-indigo-100 text-indigo-700",
-  VISION_BOXES_PREMIUM: "bg-purple-100 text-purple-700",
-  HEURISTIC: "bg-amber-100 text-amber-700",
-  FALLBACK: "bg-orange-100 text-orange-700",
-};
-
 export default async function CatalogPage({ params }: Props) {
   const { catalogId } = await params;
 
@@ -124,45 +66,11 @@ export default async function CatalogPage({ params }: Props) {
           { confidence: "desc" },
         ],
       },
-      candidates: {
-        select: {
-          id: true,
-          cropUrl: true,
-          cardUrl: true,
-          originalUrl: true,
-          pageId: true,
-          width: true,
-          height: true,
-          sourceType: true,
-          cropX: true,
-          cropY: true,
-          cropWidth: true,
-          cropHeight: true,
-          confidence: true,
-          qualityScore: true,
-          isSearchable: true,
-          rejectReason: true,
-          detectedLabel: true,
-          productName: true,
-          productNamePt: true,
-          category: true,
-          functionGroup: true,
-          model: true,
-          descriptionPt: true,
-          sourceDetector: true,
-          visionConfidence: true,
-        },
-        orderBy: [{ isSearchable: "desc" }, { qualityScore: "desc" }],
-      },
     },
   });
 
   if (!catalog) notFound();
 
-  const searchableCount = catalog.candidates.filter(
-    (c) => c.isSearchable
-  ).length;
-  const debugCount = catalog.candidates.length - searchableCount;
   const mentionsCount = catalog.productMentions.length;
   const mentionsByPage = new Map<
     number,
@@ -232,24 +140,6 @@ export default async function CatalogPage({ params }: Props) {
             <strong className="text-foreground">{catalog.pageCount}</strong>
           </span>
         )}
-        {catalog.candidateCount != null && catalog.candidateCount > 0 && (
-          <span>
-            Candidatos (legado):{" "}
-            <strong className="text-foreground">
-              {catalog.candidateCount}
-            </strong>
-            {" · "}
-            <span className="font-medium text-green-600">
-              {searchableCount} pesquisáveis
-            </span>
-            {debugCount > 0 && (
-              <span className="text-muted-foreground">
-                {" "}
-                · {debugCount} debug
-              </span>
-            )}
-          </span>
-        )}
         {mentionsCount > 0 && (
           <span>
             Produtos detectados:{" "}
@@ -270,284 +160,105 @@ export default async function CatalogPage({ params }: Props) {
         </p>
       )}
 
-      {catalog.status === "READY" && (
-        <>
-          {/* Pages + mentions */}
-          {catalog.pages.length > 0 && (
-            <section className="flex flex-col gap-3">
-              <h2 className="text-xl font-semibold">
-                Páginas renderizadas ({catalog.pages.length})
-                {mentionsCount > 0 && (
-                  <span className="text-muted-foreground ml-2 text-sm font-normal">
-                    · {mentionsCount} produtos detectados
-                  </span>
-                )}
-              </h2>
-              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {catalog.pages.map((page) => {
-                  const mentions = mentionsByPage.get(page.pageNumber) ?? [];
-                  return (
-                    <div
-                      key={page.id}
-                      className="overflow-hidden rounded-md border bg-card"
-                    >
-                      <a
-                        href={page.imageUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="bg-muted block transition-opacity hover:opacity-90"
-                      >
-                        <div className="relative aspect-[3/4]">
-                          <Image
-                            src={page.imageUrl}
-                            alt={`Página ${page.pageNumber}`}
-                            fill
-                            className="object-contain p-1"
-                            sizes="(max-width: 640px) 100vw, 33vw"
-                          />
-                        </div>
-                      </a>
-                      <div className="border-t p-2">
-                        <p className="text-muted-foreground text-xs">
-                          Pág. {page.pageNumber}
-                          {mentions.length > 0 && (
-                            <span className="text-foreground ml-1 font-medium">
-                              · {mentions.length} produto
-                              {mentions.length !== 1 ? "s" : ""}
-                            </span>
-                          )}
-                        </p>
-                        {mentions.length > 0 && (
-                          <ol className="mt-1 flex flex-col gap-1 text-xs">
-                            {mentions.slice(0, 8).map((m, idx) => (
-                              <li
-                                key={m.id}
-                                className="border-l-2 border-emerald-400 pl-2"
-                              >
-                                <p
-                                  className="font-medium leading-tight"
-                                  title={m.namePt}
-                                >
-                                  <span className="text-muted-foreground mr-1 font-mono text-[11px]">
-                                    {idx + 1}.
-                                  </span>
-                                  {m.namePt}
-                                  {m.isKit && (
-                                    <span className="ml-1 rounded bg-indigo-100 px-1 text-[10px] text-indigo-700">
-                                      kit
-                                    </span>
-                                  )}
-                                </p>
-                                {(m.brand || m.modelCodes.length > 0) && (
-                                  <p className="text-foreground/80 truncate pl-5 font-mono text-[11px]">
-                                    {[m.brand, m.modelCodes.join(", ")]
-                                      .filter(Boolean)
-                                      .join(" · ")}
-                                  </p>
-                                )}
-                                {(m.functionGroup || m.category) && (
-                                  <p className="text-muted-foreground truncate pl-5">
-                                    {[m.category, m.functionGroup]
-                                      .filter(Boolean)
-                                      .join(" · ")}
-                                  </p>
-                                )}
-                                {m.colors.length > 0 && (
-                                  <p className="text-muted-foreground pl-5">
-                                    {m.colors.join(", ")}
-                                  </p>
-                                )}
-                              </li>
-                            ))}
-                            {mentions.length > 8 && (
-                              <li className="text-muted-foreground italic">
-                                +{mentions.length - 8} outros
-                              </li>
-                            )}
-                          </ol>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </section>
-          )}
-
-          {/* Candidates */}
-          {(() => {
-            const searchable = catalog.candidates.filter((c) => c.isSearchable);
-            const rejected = catalog.candidates.filter((c) => !c.isSearchable);
-
-            const renderCard = (c: (typeof catalog.candidates)[number]) => {
-              const displayName =
-                c.productNamePt ?? c.productName ?? c.detectedLabel;
+      {catalog.status === "READY" && catalog.pages.length > 0 && (
+        <section className="flex flex-col gap-3">
+          <h2 className="text-xl font-semibold">
+            Páginas renderizadas ({catalog.pages.length})
+            {mentionsCount > 0 && (
+              <span className="text-muted-foreground ml-2 text-sm font-normal">
+                · {mentionsCount} produtos detectados
+              </span>
+            )}
+          </h2>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {catalog.pages.map((page) => {
+              const mentions = mentionsByPage.get(page.pageNumber) ?? [];
               return (
                 <div
-                  key={c.id}
-                  className={`bg-card overflow-hidden rounded-lg border ${
-                    c.isSearchable ? "border-green-500/40" : "opacity-70"
-                  }`}
+                  key={page.id}
+                  className="overflow-hidden rounded-md border bg-card"
                 >
                   <a
-                    href={c.cropUrl}
+                    href={page.imageUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="block"
+                    className="bg-muted block transition-opacity hover:opacity-90"
                   >
-                    <div className="bg-muted relative aspect-square">
+                    <div className="relative aspect-[3/4]">
                       <Image
-                        src={c.cropUrl}
-                        alt={displayName ?? "Candidato"}
+                        src={page.imageUrl}
+                        alt={`Página ${page.pageNumber}`}
                         fill
                         className="object-contain p-1"
-                        sizes="(max-width: 640px) 50vw, 20vw"
+                        sizes="(max-width: 640px) 100vw, 33vw"
                       />
                     </div>
                   </a>
-                  <div className="flex flex-col gap-1 border-t p-2 text-xs">
-                    <div className="flex flex-wrap gap-1">
-                      {c.isSearchable ? (
-                        <span className="rounded bg-green-100 px-1.5 py-0.5 font-medium text-green-700">
-                          Busca: SIM
-                        </span>
-                      ) : (
-                        <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 font-medium">
-                          Debug
+                  <div className="border-t p-2">
+                    <p className="text-muted-foreground text-xs">
+                      Pág. {page.pageNumber}
+                      {mentions.length > 0 && (
+                        <span className="text-foreground ml-1 font-medium">
+                          · {mentions.length} produto
+                          {mentions.length !== 1 ? "s" : ""}
                         </span>
                       )}
-                      {c.sourceDetector && (
-                        <span
-                          className={`rounded px-1.5 py-0.5 font-medium ${
-                            detectorBadgeClass[c.sourceDetector] ??
-                            "bg-muted text-muted-foreground"
-                          }`}
-                          title={c.sourceDetector}
-                        >
-                          {detectorLabel[c.sourceDetector] ?? c.sourceDetector}
-                        </span>
-                      )}
-                      {c.rejectReason && (
-                        <span className="bg-destructive/10 text-destructive rounded px-1.5 py-0.5">
-                          {rejectLabel[c.rejectReason] ?? c.rejectReason}
-                        </span>
-                      )}
-                    </div>
-
-                    {displayName && (
-                      <p
-                        className="leading-tight font-medium"
-                        title={displayName}
-                      >
-                        {displayName}
-                      </p>
-                    )}
-                    {(c.category || c.functionGroup) && (
-                      <p className="text-muted-foreground truncate">
-                        {[c.category, c.functionGroup]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </p>
-                    )}
-                    {c.model && (
-                      <p className="text-muted-foreground truncate">
-                        Modelo: {c.model}
-                      </p>
-                    )}
-                    {c.descriptionPt && (
-                      <p
-                        className="text-muted-foreground line-clamp-2"
-                        title={c.descriptionPt}
-                      >
-                        {c.descriptionPt}
-                      </p>
-                    )}
-
-                    <div className="text-muted-foreground flex flex-wrap gap-x-2 gap-y-0.5">
-                      {c.qualityScore != null && (
-                        <span>qual. {Math.round(c.qualityScore * 100)}%</span>
-                      )}
-                      {c.visionConfidence != null && (
-                        <span>
-                          vision {Math.round(c.visionConfidence * 100)}%
-                        </span>
-                      )}
-                      {c.confidence != null && c.visionConfidence == null && (
-                        <span>conf. {Math.round(c.confidence * 100)}%</span>
-                      )}
-                    </div>
-
-                    <p className="text-muted-foreground">
-                      {c.width}×{c.height}px
                     </p>
-                    <p className="text-muted-foreground capitalize">
-                      {c.sourceType.toLowerCase().replace("_", " ")}
-                    </p>
-
-                    <div className="mt-0.5 flex flex-col gap-0.5">
-                      <a
-                        href={c.originalUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-muted-foreground underline-offset-2 hover:underline"
-                      >
-                        Página original
-                      </a>
-                      {c.cardUrl && c.cardUrl !== c.cropUrl && (
-                        <a
-                          href={c.cardUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-muted-foreground underline-offset-2 hover:underline"
-                        >
-                          Card completo
-                        </a>
-                      )}
-                    </div>
+                    {mentions.length > 0 && (
+                      <ol className="mt-1 flex flex-col gap-1 text-xs">
+                        {mentions.slice(0, 8).map((m, idx) => (
+                          <li
+                            key={m.id}
+                            className="border-l-2 border-emerald-400 pl-2"
+                          >
+                            <p
+                              className="font-medium leading-tight"
+                              title={m.namePt}
+                            >
+                              <span className="text-muted-foreground mr-1 font-mono text-[11px]">
+                                {idx + 1}.
+                              </span>
+                              {m.namePt}
+                              {m.isKit && (
+                                <span className="ml-1 rounded bg-indigo-100 px-1 text-[10px] text-indigo-700">
+                                  kit
+                                </span>
+                              )}
+                            </p>
+                            {(m.brand || m.modelCodes.length > 0) && (
+                              <p className="text-foreground/80 truncate pl-5 font-mono text-[11px]">
+                                {[m.brand, m.modelCodes.join(", ")]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </p>
+                            )}
+                            {(m.functionGroup || m.category) && (
+                              <p className="text-muted-foreground truncate pl-5">
+                                {[m.category, m.functionGroup]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </p>
+                            )}
+                            {m.colors.length > 0 && (
+                              <p className="text-muted-foreground pl-5">
+                                {m.colors.join(", ")}
+                              </p>
+                            )}
+                          </li>
+                        ))}
+                        {mentions.length > 8 && (
+                          <li className="text-muted-foreground italic">
+                            +{mentions.length - 8} outros
+                          </li>
+                        )}
+                      </ol>
+                    )}
                   </div>
                 </div>
               );
-            };
-
-            // page_mentions mode: legacy candidate rows don't exist for new
-            // catalogs. Hide the whole section instead of showing an empty
-            // "Candidatos extraídos (0)" block — it's just visual noise.
-            if (catalog.candidates.length === 0) {
-              return null;
-            }
-
-            return (
-              <>
-                <section className="flex flex-col gap-3">
-                  <h2 className="text-xl font-semibold">
-                    Pesquisáveis ({searchable.length})
-                  </h2>
-                  {searchable.length === 0 ? (
-                    <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-800">
-                      Nenhum candidato passou nos filtros de qualidade. Veja os
-                      rejeitados abaixo para entender o motivo.
-                    </p>
-                  ) : (
-                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                      {searchable.map(renderCard)}
-                    </div>
-                  )}
-                </section>
-
-                {rejected.length > 0 && (
-                  <section className="flex flex-col gap-3">
-                    <h2 className="text-xl font-semibold">
-                      Rejeitados / Debug ({rejected.length})
-                    </h2>
-                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                      {rejected.map(renderCard)}
-                    </div>
-                  </section>
-                )}
-              </>
-            );
-          })()}
-        </>
+            })}
+          </div>
+        </section>
       )}
     </main>
   );

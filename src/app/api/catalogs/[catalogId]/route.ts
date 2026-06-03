@@ -15,26 +15,6 @@ export async function GET(_request: Request, { params }: Params) {
         select: { id: true, imageUrl: true, pageNumber: true, width: true, height: true },
         orderBy: { pageNumber: "asc" },
       },
-      candidates: {
-        select: {
-          id: true,
-          cropUrl: true,
-          originalUrl: true,
-          pageId: true,
-          width: true,
-          height: true,
-          sourceType: true,
-          cropX: true,
-          cropY: true,
-          cropWidth: true,
-          cropHeight: true,
-          confidence: true,
-          detectedLabel: true,
-          functionGroup: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "asc" },
-      },
     },
   });
 
@@ -52,11 +32,7 @@ export async function DELETE(_request: Request, { params }: Params) {
     where: { id: catalogId },
     select: {
       pdfStoragePath: true,
-      images: { select: { imageUrl: true } },
       pages: { select: { imageUrl: true } },
-      candidates: {
-        select: { cropUrl: true, originalUrl: true, cardUrl: true },
-      },
     },
   });
 
@@ -80,13 +56,7 @@ export async function DELETE(_request: Request, { params }: Params) {
 
   const allPaths = [
     catalog.pdfStoragePath ?? null,
-    ...catalog.images.map((i) => pathFromUrl(i.imageUrl)),
     ...catalog.pages.map((p) => pathFromUrl(p.imageUrl)),
-    ...catalog.candidates.flatMap((c) => [
-      pathFromUrl(c.cropUrl),
-      pathFromUrl(c.originalUrl),
-      c.cardUrl ? pathFromUrl(c.cardUrl) : null,
-    ]),
   ].filter((p): p is string => p !== null && p.length > 0);
 
   const uniquePaths = [...new Set(allPaths)];

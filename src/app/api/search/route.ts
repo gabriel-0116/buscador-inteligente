@@ -1,16 +1,9 @@
 import { NextResponse } from "next/server";
 import { generateImageEmbeddingFromFile } from "@/features/visual-search/embeddings";
-import { searchSimilarImages } from "@/features/visual-search/search";
 import { analyzeImageQueryProfileFromFile } from "@/features/visual-search/query-image-analyzer";
 import { searchPagesByQueryProfile } from "@/features/semantic-search/page-search";
 
 const MAX_SIZE = 8 * 1024 * 1024;
-
-function getSearchMode(): "page_mentions" | "legacy_candidates" {
-  const raw = (process.env.SEARCH_MODE || "page_mentions").toLowerCase().trim();
-  if (raw === "legacy_candidates") return "legacy_candidates";
-  return "page_mentions";
-}
 
 export async function POST(request: Request) {
   const formData = await request.formData();
@@ -32,42 +25,33 @@ export async function POST(request: Request) {
     );
   }
 
-  const mode = getSearchMode();
-
-  if (mode === "page_mentions") {
-    try {
-      // Run the structured profile (multimodal) and the DINOv2 visual
-      // embedding in parallel — both consume the same File but are
-      // independent calls. Visual is the *supporting* signal and is allowed
-      // to fail without aborting the search.
-      const [{ profile }, queryVisualEmbedding] = await Promise.all([
-        analyzeImageQueryProfileFromFile(image),
-        generateImageEmbeddingFromFile(image).catch((err) => {
-          console.warn("[search] visual embedding failed:", err);
-          return undefined as number[] | undefined;
-        }),
-      ]);
-      const results = await searchPagesByQueryProfile({
-        profile,
-        queryVisualEmbedding,
-      });
-      return NextResponse.json({ mode, profile, results });
-    } catch (err) {
-      console.error("[search] page_mentions failed:", err);
-      return NextResponse.json(
-        {
-          error:
-            err instanceof Error
-              ? err.message
-              : "Falha ao analisar imagem de busca",
-        },
-        { status: 500 }
-      );
-    }
+  try {
+    // Run the structured profile (multimodal) and the DINOv2 visual
+    // embedding in parallel — both consume the same File but are
+    // independent calls. Visual is the *supporting* signal and is allowed
+    // to fail without aborting the search.
+    const [{ profile }, queryVisualEmbedding] = await Promise.all([
+      analyzeImageQueryProfileFromFile(image),
+      generateImageEmbeddingFromFile(image).catch((err) => {
+        console.warn("[search] visual embedding failed:", err);
+        return undefined as number[] | undefined;
+      }),
+    ]);
+    const results = await searchPagesByQueryProfile({
+      profile,
+      queryVisualEmbedding,
+    });
+    return NextResponse.json({ profile, results });
+  } catch (err) {
+    console.error("[search] page_mentions failed:", err);
+    return NextResponse.json(
+      {
+        error:
+          err instanceof Error
+            ? err.message
+            : "Falha ao analisar imagem de busca",
+      },
+      { status: 500 }
+    );
   }
-
-  // Legacy: DINOv2 → ProductCandidate cosine search.
-  const embedding = await generateImageEmbeddingFromFile(image);
-  const results = await searchSimilarImages(embedding);
-  return NextResponse.json({ mode, results });
 }

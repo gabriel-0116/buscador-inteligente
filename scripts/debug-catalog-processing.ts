@@ -36,7 +36,6 @@ async function main() {
       fileName: true,
       status: true,
       pageCount: true,
-      candidateCount: true,
       pageProductCount: true,
       pdfStoragePath: true,
       error: true,
@@ -57,7 +56,6 @@ async function main() {
   console.log(`  status:          ${catalog.status}`);
   console.log(`  pageCount:       ${catalog.pageCount ?? "—"}`);
   console.log(`  pageProductCount:${catalog.pageProductCount ?? "—"}`);
-  console.log(`  candidateCount:  ${catalog.candidateCount ?? "—"} (legado)`);
   console.log(`  pdfStoragePath:  ${catalog.pdfStoragePath ?? "—"}`);
   console.log(`  createdAt:       ${catalog.createdAt.toISOString()}`);
   console.log(`  updatedAt:       ${catalog.updatedAt.toISOString()}`);

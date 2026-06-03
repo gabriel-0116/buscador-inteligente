@@ -4,25 +4,16 @@ import { useState } from "react";
 import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { ImageUpload } from "@/components/image-upload";
-import { SearchResults, type SearchResult } from "@/components/search-results";
 import {
   PageSearchResults,
   type PageSearchResult,
   type ImageQueryProfileLite,
 } from "@/components/page-search-results";
 
-type ApiResponse =
-  | {
-      mode: "page_mentions";
-      profile: ImageQueryProfileLite;
-      results: PageSearchResult[];
-    }
-  | {
-      mode: "legacy_candidates";
-      results: SearchResult[];
-    }
-  // Tolerate the bare-array shape from old callers, just in case.
-  | SearchResult[];
+type ApiResponse = {
+  profile: ImageQueryProfileLite;
+  results: PageSearchResult[];
+};
 
 export default function BuscaPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -63,22 +54,7 @@ export default function BuscaPage() {
     }
   }
 
-  const view = (() => {
-    if (!response) return null;
-    if (Array.isArray(response)) {
-      return { kind: "legacy" as const, results: response };
-    }
-    if (response.mode === "page_mentions") {
-      return {
-        kind: "pages" as const,
-        results: response.results,
-        profile: response.profile,
-      };
-    }
-    return { kind: "legacy" as const, results: response.results };
-  })();
-
-  const resultCount = view ? view.results.length : 0;
+  const resultCount = response?.results.length ?? 0;
 
   return (
     <main className="mx-auto flex max-w-6xl flex-col gap-8 p-6">
@@ -111,20 +87,16 @@ export default function BuscaPage() {
         {error && <p className="text-sm text-destructive">{error}</p>}
       </div>
 
-      {view && (
+      {response && (
         <div className="flex flex-col gap-4">
           <h2 className="text-xl font-medium">
             {resultCount} resultado{resultCount !== 1 ? "s" : ""} encontrado
             {resultCount !== 1 ? "s" : ""}
           </h2>
-          {view.kind === "pages" ? (
-            <PageSearchResults
-              results={view.results}
-              profile={view.profile ?? null}
-            />
-          ) : (
-            <SearchResults results={view.results} />
-          )}
+          <PageSearchResults
+            results={response.results}
+            profile={response.profile ?? null}
+          />
         </div>
       )}
     </main>

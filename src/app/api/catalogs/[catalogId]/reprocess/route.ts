@@ -26,7 +26,6 @@ export async function POST(_request: Request, { params }: Params) {
     where: { id: catalogId },
     include: {
       pages: { select: { imageUrl: true } },
-      candidates: { select: { cropUrl: true, originalUrl: true, cardUrl: true } },
     },
   });
 
@@ -45,13 +44,9 @@ export async function POST(_request: Request, { params }: Params) {
   }
 
   // ── Delete old storage files ─────────────────────────────────────────────
-  const storagePaths = [
-    ...catalog.pages.map((p) => pathFromUrl(p.imageUrl)),
-    ...catalog.candidates.flatMap((c) => [
-      pathFromUrl(c.cropUrl),
-      c.cardUrl ? pathFromUrl(c.cardUrl) : null,
-    ]),
-  ].filter((p): p is string => p !== null);
+  const storagePaths = catalog.pages
+    .map((p) => pathFromUrl(p.imageUrl))
+    .filter((p): p is string => p !== null);
 
   const uniquePaths = [...new Set(storagePaths)];
   if (uniquePaths.length > 0) {
@@ -59,11 +54,10 @@ export async function POST(_request: Request, { params }: Params) {
   }
 
   // ── Delete old DB records ────────────────────────────────────────────────
-  // CatalogPage cascades to ProductCandidate AND PageProductMention, but
-  // delete the children explicitly first to keep the intent obvious and
-  // survive any future relation change.
+  // CatalogPage cascades to PageProductMention; deleting the children
+  // explicitly first keeps the intent obvious and survives any future
+  // relation change.
   await prisma.pageProductMention.deleteMany({ where: { catalogId } });
-  await prisma.productCandidate.deleteMany({ where: { catalogId } });
   await prisma.catalogPage.deleteMany({ where: { catalogId } });
 
   // ── Mark as PROCESSING ───────────────────────────────────────────────────
@@ -73,7 +67,6 @@ export async function POST(_request: Request, { params }: Params) {
       status: "PROCESSING",
       error: null,
       pageCount: null,
-      candidateCount: null,
       pageProductCount: null,
     },
   });

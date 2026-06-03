@@ -7,8 +7,8 @@ import {
   prepareVisionInputImage,
   resolveProviderAndModel,
   VisionDetectorUnavailableError,
+  VisionJsonParseError,
 } from "./vision-json-detector";
-import { VisionJsonParseError } from "./product-json-schema";
 
 // ── Page-level product analyzer ─────────────────────────────────────────────
 //
@@ -417,14 +417,12 @@ export function normalizeKitFlag(
 // ── Provider/model resolution for the analyzer ──────────────────────────────
 //
 // Reuses VISION_DETECTOR_PROVIDER / VISION_DETECTOR_API_KEY but allows a
-// dedicated model override so the analyzer can use a cheaper or more
-// capable model than the boxes-only detector.
+// dedicated model override; VISION_DETECTOR_MODEL_CHEAP remains a legitimate
+// fallback so a single env var can configure both analyzers at once.
 
 export function getPageAnalyzerModel(): string | undefined {
   return (
-    process.env.PAGE_ANALYZER_MODEL ||
-    process.env.VISION_DETECTOR_MODEL_CHEAP ||
-    process.env.VISION_DETECTOR_MODEL
+    process.env.PAGE_ANALYZER_MODEL || process.env.VISION_DETECTOR_MODEL_CHEAP
   );
 }
 
@@ -476,7 +474,7 @@ export async function analyzeCatalogPageProducts(args: {
   const model = args.modelOverride ?? getPageAnalyzerModel();
   if (!model) {
     throw new VisionDetectorUnavailableError(
-      "PAGE_ANALYZER_MODEL (or VISION_DETECTOR_MODEL_CHEAP/MODEL) must be set to analyze pages"
+      "PAGE_ANALYZER_MODEL (or VISION_DETECTOR_MODEL_CHEAP) must be set to analyze pages"
     );
   }
 

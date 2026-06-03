@@ -1,4 +1,4 @@
-import { rm, readFile, stat } from "node:fs/promises";
+import { rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import sharp from "sharp";
@@ -7,15 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { uploadImageToStorage, supabaseAdmin } from "@/lib/supabase";
 import { generateImageEmbeddingFromPath } from "@/features/visual-search/embeddings";
 import { renderPdfPagesToImages } from "./render-pages";
-import {
-  detectProductCandidatesFromPage,
-  type DetectionDecision,
-} from "./detect-product-candidates";
 import { extractPdfLayout, type PdfLayoutPage } from "./pdf-layout-extractor";
-import {
-  getMaxVisionPagesPerCatalog,
-  getVisionMode,
-} from "./vision-json-detector";
 import {
   analyzeCatalogPageProducts,
   buildPageProductSearchText,
@@ -26,39 +18,20 @@ import {
   toPgVectorLiteral,
 } from "@/features/semantic-search/text-embeddings";
 
-// ── Processing mode ──────────────────────────────────────────────────────────
-//
-// `page_mentions` (default, new): page is the visual result; products are
-// detected as PageProductMention rows with textual embeddings. No crops.
-//
-// `legacy_crops`: the old detector cascade — kept temporarily so we don't
-// break existing scripts/UI that depend on ProductCandidate.
-
-export type CatalogProcessingMode = "page_mentions" | "legacy_crops";
-
-export function getCatalogProcessingMode(): CatalogProcessingMode {
-  const raw = (
-    process.env.CATALOG_PROCESSING_MODE || "page_mentions"
-  )
-    .toLowerCase()
-    .trim();
-  if (raw === "legacy_crops") return "legacy_crops";
-  return "page_mentions";
-}
-
 // ── Public entry point ──────────────────────────────────────────────────────
+//
+// page_mentions is the only mode. Each rendered page becomes the visual
+// result; per-page products are persisted as PageProductMention rows with
+// textual embeddings. No crops, no detector cascade.
 
 export async function processCatalog(
   catalogId: string,
   pdfPath: string
 ): Promise<void> {
-  const mode = getCatalogProcessingMode();
   const baseDir = join(tmpdir(), catalogId);
   const pagesDir = join(baseDir, "pages");
-  const candidatesDir = join(baseDir, "candidates");
 
   try {
-    // ── Look up catalog + supplier metadata (cheap, used by both modes) ──
     const catalogRow = await prisma.catalog.findUnique({
       where: { id: catalogId },
       select: {
@@ -92,7 +65,8 @@ export async function processCatalog(
 
     const renderedPages = await renderPdfPagesToImages(pdfPath, pagesDir);
 
-    // ── Extract PDF structure once (best-effort) ───────────────────────────
+    // ── Extract PDF structure once (best-effort, feeds the analyzer's
+    // ── pdfTextBlocks evidence) ────────────────────────────────────────────
     const layout = await extractPdfLayout({ pdfPath, outputDir: baseDir });
     const layoutByPage = new Map<number, PdfLayoutPage>();
     if (layout) {
@@ -102,30 +76,21 @@ export async function processCatalog(
       );
     } else {
       console.warn(
-        `[catalog ${catalogId}] pdf-layout unavailable → analyzer/heuristic only`
+        `[catalog ${catalogId}] pdf-layout unavailable → analyzer runs without PDF text evidence`
       );
     }
 
     console.log(
-      `[catalog ${catalogId}] mode=${mode} totalPages=${renderedPages.length}`
+      `[catalog ${catalogId}] totalPages=${renderedPages.length}`
     );
 
-    if (mode === "page_mentions") {
-      await processInPageMentionsMode({
-        catalogId,
-        renderedPages,
-        layoutByPage,
-        supplierName,
-        catalogFileName,
-      });
-    } else {
-      await processInLegacyCropsMode({
-        catalogId,
-        renderedPages,
-        layoutByPage,
-        candidatesDir,
-      });
-    }
+    await processInPageMentionsMode({
+      catalogId,
+      renderedPages,
+      layoutByPage,
+      supplierName,
+      catalogFileName,
+    });
 
     await prisma.catalog.update({
       where: { id: catalogId },
@@ -160,7 +125,7 @@ async function processInPageMentionsMode(args: {
   const analyzerReady = isPageAnalyzerConfigured();
   if (!analyzerReady) {
     console.warn(
-      `[catalog ${catalogId}] page-mentions mode: analyzer not configured (VISION_DETECTOR_PROVIDER/API_KEY/MODEL or PAGE_ANALYZER_MODEL). Pages will be saved without products.`
+      `[catalog ${catalogId}] page-mentions: analyzer not configured (set VISION_DETECTOR_PROVIDER + VISION_DETECTOR_API_KEY and PAGE_ANALYZER_MODEL or VISION_DETECTOR_MODEL_CHEAP). Pages will be saved without products.`
     );
   }
 
@@ -456,195 +421,3 @@ async function processInPageMentionsMode(args: {
   );
 }
 
-// ── Legacy crops mode (preserved behavior) ──────────────────────────────────
-
-async function processInLegacyCropsMode(args: {
-  catalogId: string;
-  renderedPages: Array<{ pageNumber: number; imagePath: string }>;
-  layoutByPage: Map<number, PdfLayoutPage>;
-  candidatesDir: string;
-}): Promise<void> {
-  const { catalogId, renderedPages, layoutByPage, candidatesDir } = args;
-  let pageCount = 0;
-  let candidateCount = 0;
-
-  // Per-catalog vision call budget — protects against runaway costs.
-  const maxVisionPages = getMaxVisionPagesPerCatalog();
-  const visionBudget = { remaining: maxVisionPages };
-  const visionMode = getVisionMode();
-  const decisionCounts: Record<DetectionDecision, number> = {
-    GRID_LAYOUT: 0,
-    PDF_LAYOUT: 0,
-    PAGE_SKIP: 0,
-    HEURISTIC: 0,
-    VISION_CHEAP: 0,
-    VISION_PREMIUM: 0,
-    FALLBACK: 0,
-    BUDGET_EXCEEDED: 0,
-    VISION_OFF: 0,
-  };
-  let totalVisionCalls = 0;
-  const modelsUsed = new Set<string>();
-  console.log(
-    `[catalog ${catalogId}] legacy_crops mode=${visionMode} maxVisionPages=${maxVisionPages}`
-  );
-
-  for (const { pageNumber, imagePath } of renderedPages) {
-    try {
-      const [pageMeta, pageBuffer] = await Promise.all([
-        sharp(imagePath).metadata(),
-        sharp(imagePath)
-          .flatten({ background: { r: 255, g: 255, b: 255 } })
-          .jpeg({ quality: 85 })
-          .toBuffer(),
-      ]);
-
-      const pageStoragePath = `${catalogId}/pages/page-${String(pageNumber).padStart(3, "0")}.jpg`;
-      const pageUrl = await uploadImageToStorage(pageStoragePath, pageBuffer);
-
-      const catalogPage = await prisma.catalogPage.create({
-        data: {
-          catalogId,
-          pageNumber,
-          imageUrl: pageUrl,
-          width: pageMeta.width ?? 0,
-          height: pageMeta.height ?? 0,
-        },
-      });
-
-      pageCount++;
-
-      const { candidates, pageAnalysis, stats } =
-        await detectProductCandidatesFromPage({
-          pageImagePath: imagePath,
-          outputDir: candidatesDir,
-          pageNumber,
-          pageLayout: layoutByPage.get(pageNumber),
-          visionBudget,
-        });
-
-      decisionCounts[stats.decision]++;
-      totalVisionCalls += stats.visionCallsMade;
-      if (stats.modelUsed) modelsUsed.add(stats.modelUsed);
-
-      if (pageAnalysis.rawJson !== undefined || pageAnalysis.error) {
-        try {
-          await prisma.pageAnalysis.create({
-            data: {
-              catalogId,
-              pageId: catalogPage.id,
-              pageNumber,
-              provider: pageAnalysis.provider,
-              model: pageAnalysis.model,
-              productsCount: pageAnalysis.productsCount,
-              error: pageAnalysis.error,
-              rawJson:
-                (pageAnalysis.rawJson as Prisma.InputJsonValue | undefined) ??
-                ({ products: [] } as Prisma.InputJsonValue),
-            },
-          });
-        } catch (err) {
-          console.error(
-            `Erro ao salvar PageAnalysis (pág. ${pageNumber}):`,
-            err
-          );
-        }
-      }
-
-      for (const candidate of candidates) {
-        try {
-          const [cropMeta, cropStat, cropBuffer] = await Promise.all([
-            sharp(candidate.imagePath).metadata(),
-            stat(candidate.imagePath),
-            readFile(candidate.imagePath),
-          ]);
-
-          const candidateIndex = candidateCount + 1;
-          const cropStoragePath = `${catalogId}/candidates/candidate-${String(candidateIndex).padStart(4, "0")}.jpg`;
-          const cropUrl = await uploadImageToStorage(
-            cropStoragePath,
-            cropBuffer
-          );
-
-          let cardUrl: string | undefined;
-          if (candidate.cardImagePath) {
-            try {
-              const cardBuffer = await readFile(candidate.cardImagePath);
-              const cardStoragePath = `${catalogId}/candidates/card-${String(candidateIndex).padStart(4, "0")}.jpg`;
-              cardUrl = await uploadImageToStorage(
-                cardStoragePath,
-                cardBuffer
-              );
-            } catch {
-              // optional
-            }
-          }
-
-          const record = await prisma.productCandidate.create({
-            data: {
-              catalogId,
-              pageId: catalogPage.id,
-              originalUrl: pageUrl,
-              cropUrl,
-              cardUrl: cardUrl ?? cropUrl,
-              width: cropMeta.width ?? candidate.width,
-              height: cropMeta.height ?? candidate.height,
-              fileSize: cropStat.size,
-              sourceType: "PAGE_CROP",
-              cropX: candidate.x,
-              cropY: candidate.y,
-              cropWidth: candidate.width,
-              cropHeight: candidate.height,
-              confidence: candidate.confidence,
-              isSearchable: candidate.isSearchable,
-              qualityScore: candidate.qualityScore,
-              rejectReason: candidate.rejectReason,
-              productName: candidate.productName,
-              productNamePt: candidate.productNamePt,
-              category: candidate.category,
-              functionGroup: candidate.functionGroup,
-              model: candidate.model,
-              originalText: candidate.originalText,
-              descriptionPt: candidate.descriptionPt,
-              sourceDetector: candidate.sourceDetector,
-              visionConfidence: candidate.visionConfidence,
-              rawVisionJson: candidate.rawVisionJson as
-                | Prisma.InputJsonValue
-                | undefined,
-            },
-          });
-
-          if (candidate.isSearchable && candidate.qualityScore >= 0.6) {
-            const embedding = await generateImageEmbeddingFromPath(
-              candidate.imagePath
-            );
-            const vectorStr = `[${embedding.join(",")}]`;
-            await prisma.$executeRaw`
-              UPDATE "ProductCandidate"
-              SET embedding = ${vectorStr}::vector
-              WHERE id = ${record.id}
-            `;
-          }
-
-          candidateCount++;
-        } catch (err) {
-          console.error(
-            `Erro ao processar candidato (pág. ${pageNumber}):`,
-            err
-          );
-        }
-      }
-    } catch (err) {
-      console.error(`Erro ao processar página ${pageNumber}:`, err);
-    }
-  }
-
-  await prisma.catalog.update({
-    where: { id: catalogId },
-    data: { pageCount, candidateCount },
-  });
-
-  console.log(
-    `[catalog ${catalogId}] summary(legacy_crops): totalPages=${pageCount} gridLayoutPages=${decisionCounts.GRID_LAYOUT} pdfLayoutPages=${decisionCounts.PDF_LAYOUT} pageSkipPages=${decisionCounts.PAGE_SKIP} heuristicPages=${decisionCounts.HEURISTIC} visionCheapPages=${decisionCounts.VISION_CHEAP} visionPremiumPages=${decisionCounts.VISION_PREMIUM} fallbackPages=${decisionCounts.FALLBACK} budgetExceededPages=${decisionCounts.BUDGET_EXCEEDED} visionOffPages=${decisionCounts.VISION_OFF} estimatedVisionCalls=${totalVisionCalls} budgetRemaining=${visionBudget.remaining}/${maxVisionPages} modelsUsed=${[...modelsUsed].join(",") || "none"}`
-  );
-}

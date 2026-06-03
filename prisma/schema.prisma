@@ -21,9 +21,7 @@ model Catalog {
   fileName         String
   status           CatalogStatus @default(PROCESSING)
   pageCount        Int?
-  imageCount       Int?
-  candidateCount   Int?
-  // Page-level strategy counter — total PageProductMention rows.
+  // Total PageProductMention rows produced by the page analyzer.
   pageProductCount Int?
   pdfStoragePath   String?
   error            String?
@@ -31,9 +29,7 @@ model Catalog {
   updatedAt        DateTime      @updatedAt
 
   supplier        Supplier             @relation(fields: [supplierId], references: [id], onDelete: Cascade)
-  images          ProductImage[]
   pages           CatalogPage[]
-  candidates      ProductCandidate[]
   analyses        PageAnalysis[]
   productMentions PageProductMention[]
 
@@ -41,24 +37,8 @@ model Catalog {
   @@index([status])
 }
 
-// Legacy — kept for backward compat; not used in the main search pipeline anymore
-model ProductImage {
-  id        String   @id @default(cuid())
-  catalogId String
-  imageUrl  String
-  width     Int
-  height    Int
-  fileSize  Int?
-  embedding Unsupported("vector(768)")?
-  createdAt DateTime @default(now())
-
-  catalog Catalog @relation(fields: [catalogId], references: [id], onDelete: Cascade)
-
-  @@index([catalogId])
-}
-
 model CatalogPage {
-  id         String   @id @default(cuid())
+  id         String @id @default(cuid())
   catalogId  String
   pageNumber Int
   imageUrl   String
@@ -68,10 +48,9 @@ model CatalogPage {
   // page_mentions search. Never the primary signal: visual-only matches are
   // capped at "low confidence" by the reranker.
   visualEmbedding Unsupported("vector(768)")?
-  createdAt  DateTime @default(now())
+  createdAt       DateTime                    @default(now())
 
   catalog         Catalog              @relation(fields: [catalogId], references: [id], onDelete: Cascade)
-  candidates      ProductCandidate[]
   analyses        PageAnalysis[]
   productMentions PageProductMention[]
 
@@ -79,64 +58,17 @@ model CatalogPage {
   @@unique([catalogId, pageNumber])
 }
 
-model ProductCandidate {
-  id          String               @id @default(cuid())
-  catalogId   String
-  pageId      String?
-  originalUrl String
-  cropUrl     String
-  width       Int
-  height      Int
-  fileSize    Int?
-  sourceType  CandidateSourceType  @default(PAGE_CROP)
-  cropX       Int?
-  cropY       Int?
-  cropWidth   Int?
-  cropHeight  Int?
-
-  detectedLabel String?
-  functionGroup String?
-  confidence    Float?
-
-  isSearchable Boolean  @default(false)
-  qualityScore Float?
-  rejectReason String?
-  cardUrl      String?
-
-  // Structured product metadata produced by the multimodal vision detector
-  productName      String?
-  productNamePt    String?
-  category         String?
-  model            String?
-  originalText     String?
-  descriptionPt    String?
-  sourceDetector   String?
-  visionConfidence Float?
-  rawVisionJson    Json?
-
-  embedding Unsupported("vector(768)")?
-  createdAt DateTime                   @default(now())
-
-  catalog Catalog      @relation(fields: [catalogId], references: [id], onDelete: Cascade)
-  page    CatalogPage? @relation(fields: [pageId], references: [id], onDelete: SetNull)
-
-  @@index([catalogId])
-  @@index([pageId])
-  @@index([functionGroup])
-  @@index([sourceDetector])
-}
-
 model PageAnalysis {
-  id             String   @id @default(cuid())
-  catalogId      String
-  pageId         String
-  pageNumber     Int
-  provider       String?
-  model          String?
-  rawJson        Json
-  productsCount  Int
-  error          String?
-  createdAt      DateTime @default(now())
+  id            String   @id @default(cuid())
+  catalogId     String
+  pageId        String
+  pageNumber    Int
+  provider      String?
+  model         String?
+  rawJson       Json
+  productsCount Int
+  error         String?
+  createdAt     DateTime @default(now())
 
   catalog Catalog     @relation(fields: [catalogId], references: [id], onDelete: Cascade)
   page    CatalogPage @relation(fields: [pageId], references: [id], onDelete: Cascade)
@@ -145,12 +77,12 @@ model PageAnalysis {
   @@index([pageId])
 }
 
-// Page-level search unit — see PAGE_LEVEL_SEARCH_REFACTOR.md.
-// Each row represents one product detected by the multimodal analyzer on a
-// catalog page. There is no crop: the page is the visual result, the
-// mention is the unit of intelligence. The embedding is *textual/semantic*
-// over the consolidated `searchText` — independent from the visual DINOv2
-// embedding still used by the legacy ProductCandidate pipeline.
+// Page-level search unit. Each row is one product detected by the multimodal
+// analyzer on a catalog page. There is no crop: the page is the visual
+// result, the mention is the unit of intelligence. The embedding is
+// *textual/semantic* over the consolidated `searchText` and is what the
+// hybrid search ranks against (alongside the visual DINOv2 embedding on
+// CatalogPage).
 model PageProductMention {
   id        String @id @default(cuid())
   catalogId String
@@ -158,8 +90,8 @@ model PageProductMention {
 
   pageNumber Int
   // Visual order of the product on the page (1-based, left→right, top→bottom).
-  // Set by process-catalog from the analyzer's response order. NULL on legacy
-  // rows; sorts last with `ORDER BY ... NULLS LAST` semantics in Postgres ASC.
+  // Set by process-catalog from the analyzer's response order. NULL on rows
+  // written before the column existed; Postgres sorts NULLs last in ASC.
   displayOrder Int?
 
   namePt        String
@@ -168,9 +100,9 @@ model PageProductMention {
   category      String?
   functionGroup String?
 
-  // Strong textual signals — see atualizacao.md. The analyzer extracts these
-  // explicitly so they outrank the pt-BR translation: same modelCode → same
-  // product, regardless of how the catalog spells it.
+  // Strong textual signals — extracted by the analyzer so they outrank the
+  // pt-BR translation. Same modelCode → same product, regardless of how the
+  // catalog spells it.
   brand      String?
   modelCodes String[] @default([])
   aliases    String[] @default([])
@@ -206,12 +138,6 @@ model PageProductMention {
   @@index([category])
   @@index([pageNumber])
   @@index([brand])
-}
-
-enum CandidateSourceType {
-  PAGE_CROP
-  EMBEDDED_IMAGE
-  MANUAL
 }
 
 enum CatalogStatus {

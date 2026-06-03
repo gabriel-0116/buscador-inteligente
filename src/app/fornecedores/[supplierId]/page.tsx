@@ -71,7 +71,7 @@ export default async function SupplierPage({ params }: Props) {
               <TableRow>
                 <TableHead>Arquivo</TableHead>
                 <TableHead>Status</TableHead>
-                <TableHead className="text-right">Candidatos</TableHead>
+                <TableHead className="text-right">Produtos</TableHead>
                 <TableHead>Enviado em</TableHead>
                 <TableHead />
               </TableRow>
@@ -97,7 +97,7 @@ export default async function SupplierPage({ params }: Props) {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right">
-                    {c.candidateCount ?? c.imageCount ?? "—"}
+                    {c.pageProductCount ?? "—"}
                   </TableCell>
                   <TableCell className="text-muted-foreground">
                     {new Date(c.createdAt).toLocaleDateString("pt-BR")}

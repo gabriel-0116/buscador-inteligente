@@ -5,11 +5,11 @@ import { Button } from "@/components/ui/button";
 import { prisma } from "@/lib/prisma";
 
 export default async function HomePage() {
-  const [supplierCount, catalogCount, pageCount, candidateCount] = await Promise.all([
+  const [supplierCount, catalogCount, pageCount, mentionCount] = await Promise.all([
     prisma.supplier.count(),
     prisma.catalog.count({ where: { status: "READY" } }),
     prisma.catalogPage.count(),
-    prisma.productCandidate.count(),
+    prisma.pageProductMention.count(),
   ]);
 
   return (
@@ -44,8 +44,8 @@ export default async function HomePage() {
           <p className="text-sm text-muted-foreground">Páginas processadas</p>
         </div>
         <div className="rounded-lg border p-4">
-          <p className="text-2xl font-bold">{candidateCount}</p>
-          <p className="text-sm text-muted-foreground">Candidatos indexados</p>
+          <p className="text-2xl font-bold">{mentionCount}</p>
+          <p className="text-sm text-muted-foreground">Produtos detectados</p>
         </div>
       </div>
     </main>
