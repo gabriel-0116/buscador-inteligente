@@ -6,6 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { AutoRefresh } from "@/components/auto-refresh";
 import { DeleteCatalogButton } from "@/components/delete-catalog-button";
 import { ReprocessCatalogButton } from "@/components/reprocess-catalog-button";
+import { CatalogHealthPanel } from "@/components/catalog-health-panel";
+import { getCatalogHealth } from "@/server/services/catalog-health";
 
 type Props = { params: Promise<{ catalogId: string }> };
 
@@ -70,6 +72,16 @@ export default async function CatalogPage({ params }: Props) {
   });
 
   if (!catalog) notFound();
+
+  // Compute the health snapshot in parallel with the rest of the render
+  // (Next.js will await before flushing, but the query runs alongside the
+  // already-completed `catalog` fetch instead of serially). Skip while the
+  // catalog is still PROCESSING — the panel needs final counts to mean
+  // anything.
+  const health =
+    catalog.status === "READY"
+      ? await getCatalogHealth(catalogId)
+      : null;
 
   const mentionsCount = catalog.productMentions.length;
   const mentionsByPage = new Map<
@@ -158,6 +170,10 @@ export default async function CatalogPage({ params }: Props) {
         <p className="text-muted-foreground">
           Processando catálogo, aguarde...
         </p>
+      )}
+
+      {catalog.status === "READY" && health && (
+        <CatalogHealthPanel health={health} />
       )}
 
       {catalog.status === "READY" && catalog.pages.length > 0 && (
