@@ -11,8 +11,34 @@ import { prisma } from "@/lib/prisma";
 //   PageAnalysis        — analyzer error count
 //   PageProductMention  — products + functionGroup/brand/colors/modelCodes
 //                         coverage + functionGroup distribution
+//
+// Color/status is the *same* function for individual metric chips and for
+// the overall gate: `rateStatus(rate, greenAt, yellowAt)`. Three gate
+// metrics (page success, visual coverage, functionGroup quality) drive the
+// overall status. `productiveRate` is informational only — the catalog
+// page renders its chip neutral and there's no warning for it.
 
 export type CatalogHealthStatus = "green" | "yellow" | "red";
+export type MetricStatus = "green" | "yellow" | "red" | "neutral";
+
+// Threshold table — single source of truth for both per-chip color AND for
+// the overall gate. Each entry is `{ green, yellow }`: a metric is green
+// when `rate >= green`, yellow when `green > rate >= yellow`, red below.
+export const HEALTH_THRESHOLDS = {
+  pageSuccess: { green: 0.95, yellow: 0.85 },
+  visualCoverage: { green: 0.9, yellow: 0.75 },
+  functionGroup: { green: 0.9, yellow: 0.75 },
+} as const;
+
+export function rateStatus(
+  rate: number,
+  greenAt: number,
+  yellowAt: number
+): MetricStatus {
+  if (rate >= greenAt) return "green";
+  if (rate >= yellowAt) return "yellow";
+  return "red";
+}
 
 export type CatalogHealth = {
   totalPages: number;
@@ -28,7 +54,7 @@ export type CatalogHealth = {
 
   pageSuccessRate: number; // 0..1
   visualCoverageRate: number;
-  productiveRate: number;
+  productiveRate: number; // informational only
   functionGroupRate: number;
 
   overallStatus: CatalogHealthStatus;
@@ -128,7 +154,7 @@ export async function getCatalogHealth(
   const productiveRate = safeRate(pagesWithProducts, totalPages);
   const functionGroupRate = safeRate(productsWithFunctionGroup, totalProducts);
 
-  const overallStatus = computeStatus({
+  const overallStatus = computeOverallStatus({
     totalPages,
     totalProducts,
     pageSuccessRate,
@@ -143,6 +169,9 @@ export async function getCatalogHealth(
     pagesWithVisualEmbedding,
     productsWithFunctionGroup,
     functionGroupDistribution,
+    pageSuccessRate,
+    visualCoverageRate,
+    functionGroupRate,
   });
 
   return {
@@ -165,14 +194,13 @@ export async function getCatalogHealth(
   };
 }
 
-// ── Status thresholds ──────────────────────────────────────────────────────
+// ── Overall status ─────────────────────────────────────────────────────────
 //
-// Three gating rates: pageSuccess, visualCoverage, functionGroup. Visual
-// coverage gets a lower green threshold (0.90) because DINOv2 failures are
-// the most benign — they just hide the page from the visual *boost* in the
-// hybrid search; the page is still findable semantically.
+// Worst-of the three gate metrics. Uses the *same* `rateStatus` helper the
+// UI uses per chip, so a metric can never be visually green but counted as
+// yellow in the overall — or vice versa.
 
-function computeStatus(args: {
+function computeOverallStatus(args: {
   totalPages: number;
   totalProducts: number;
   pageSuccessRate: number;
@@ -181,26 +209,31 @@ function computeStatus(args: {
 }): CatalogHealthStatus {
   if (args.totalPages === 0 || args.totalProducts === 0) return "red";
 
-  const { pageSuccessRate, visualCoverageRate, functionGroupRate } = args;
-
-  if (
-    pageSuccessRate < 0.7 ||
-    visualCoverageRate < 0.7 ||
-    functionGroupRate < 0.7
-  ) {
-    return "red";
-  }
-  if (
-    pageSuccessRate >= 0.95 &&
-    visualCoverageRate >= 0.9 &&
-    functionGroupRate >= 0.95
-  ) {
-    return "green";
-  }
-  return "yellow";
+  const t = HEALTH_THRESHOLDS;
+  const gateStatuses: MetricStatus[] = [
+    rateStatus(args.pageSuccessRate, t.pageSuccess.green, t.pageSuccess.yellow),
+    rateStatus(
+      args.visualCoverageRate,
+      t.visualCoverage.green,
+      t.visualCoverage.yellow
+    ),
+    rateStatus(
+      args.functionGroupRate,
+      t.functionGroup.green,
+      t.functionGroup.yellow
+    ),
+  ];
+  if (gateStatuses.includes("red")) return "red";
+  if (gateStatuses.includes("yellow")) return "yellow";
+  return "green";
 }
 
 // ── Human-readable warnings (pt-BR) ────────────────────────────────────────
+//
+// A warning fires whenever the corresponding gate metric is not green —
+// i.e., its `rateStatus` is yellow or red against `HEALTH_THRESHOLDS`. This
+// keeps the warning list and the mini-card colors in lock-step.
+// `productiveRate` has no warning by spec — it's informational.
 
 function buildWarnings(args: {
   totalPages: number;
@@ -209,6 +242,9 @@ function buildWarnings(args: {
   pagesWithVisualEmbedding: number;
   productsWithFunctionGroup: number;
   functionGroupDistribution: Array<{ functionGroup: string; count: number }>;
+  pageSuccessRate: number;
+  visualCoverageRate: number;
+  functionGroupRate: number;
 }): string[] {
   const out: string[] = [];
 
@@ -222,7 +258,27 @@ function buildWarnings(args: {
     );
   }
 
-  if (args.pagesWithError > 0) {
+  const t = HEALTH_THRESHOLDS;
+  const successNotGreen =
+    rateStatus(
+      args.pageSuccessRate,
+      t.pageSuccess.green,
+      t.pageSuccess.yellow
+    ) !== "green";
+  const visualNotGreen =
+    rateStatus(
+      args.visualCoverageRate,
+      t.visualCoverage.green,
+      t.visualCoverage.yellow
+    ) !== "green";
+  const fgNotGreen =
+    rateStatus(
+      args.functionGroupRate,
+      t.functionGroup.green,
+      t.functionGroup.yellow
+    ) !== "green";
+
+  if (successNotGreen && args.pagesWithError > 0) {
     const pct = Math.round((args.pagesWithError / args.totalPages) * 100);
     out.push(
       `${pct}% das páginas (${args.pagesWithError}/${args.totalPages}) falharam no analyzer — reprocesse o catálogo.`
@@ -230,7 +286,7 @@ function buildWarnings(args: {
   }
 
   const missingVisual = args.totalPages - args.pagesWithVisualEmbedding;
-  if (missingVisual > 0) {
+  if (visualNotGreen && missingVisual > 0) {
     out.push(
       `${missingVisual} página${missingVisual === 1 ? "" : "s"} sem embedding visual — não aparecem na busca híbrida.`
     );
@@ -238,13 +294,11 @@ function buildWarnings(args: {
 
   if (args.totalProducts > 0) {
     const missingFg = args.totalProducts - args.productsWithFunctionGroup;
-    if (missingFg > 0) {
+    if (fgNotGreen && missingFg > 0) {
       const pct = Math.round((missingFg / args.totalProducts) * 100);
-      if (pct >= 5) {
-        out.push(
-          `${pct}% dos produtos sem functionGroup — reranker pode classificar mal.`
-        );
-      }
+      out.push(
+        `${pct}% dos produtos sem functionGroup — reranker pode classificar mal.`
+      );
     }
 
     // Dominant-group warning: catches "analyzer só conhece esse rótulo".
