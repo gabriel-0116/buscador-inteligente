@@ -89,7 +89,7 @@ async function main() {
       );
       const trimmed = (a.error ?? "")
         .split("\n")
-        .map((l) => `    ${l}`)
+        .map((l: string) => `    ${l}`)
         .join("\n");
       console.log(trimmed);
     }
