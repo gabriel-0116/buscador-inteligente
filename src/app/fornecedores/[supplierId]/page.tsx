@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import { Badge } from "@/components/ui/badge";
+import { Breadcrumb } from "@/components/breadcrumb";
 import {
   Table,
   TableBody,
@@ -46,17 +47,19 @@ export default async function SupplierPage({ params }: Props) {
   );
 
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-6 p-6">
+    <main className="mx-auto flex max-w-screen-xl flex-col gap-6 px-4 py-10 md:px-6">
       {hasProcessing && <AutoRefresh intervalMs={5000} />}
 
-      <div className="flex flex-col gap-1">
-        <p className="text-sm text-muted-foreground">
-          <Link href="/fornecedores" className="hover:underline">
-            Fornecedores
-          </Link>{" "}
-          / {supplier.name}
-        </p>
-        <h1 className="text-3xl font-semibold">{supplier.name}</h1>
+      <div className="flex flex-col gap-2">
+        <Breadcrumb
+          items={[
+            { label: "Fornecedores", href: "/fornecedores" },
+            { label: supplier.name },
+          ]}
+        />
+        <h1 className="text-2xl font-semibold tracking-tight">
+          {supplier.name}
+        </h1>
       </div>
 
       <CatalogUpload supplierId={supplierId} />

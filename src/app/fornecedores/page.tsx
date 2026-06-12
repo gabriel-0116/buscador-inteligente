@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import Link from "next/link";
+import { Building2 } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import {
   Table,
@@ -19,14 +20,33 @@ export default async function FornecedoresPage() {
   });
 
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-6 p-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-semibold">Fornecedores</h1>
+    <main className="mx-auto flex max-w-screen-xl flex-col gap-6 px-4 py-10 md:px-6">
+      <header className="flex items-center justify-between gap-4">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-2xl font-semibold tracking-tight">Fornecedores</h1>
+          <p className="text-sm text-muted-foreground">
+            Cadastre fornecedores e suba catálogos PDF para indexação.
+          </p>
+        </div>
         <CreateSupplierDialog />
-      </div>
+      </header>
 
       {suppliers.length === 0 ? (
-        <p className="text-muted-foreground">Nenhum fornecedor cadastrado.</p>
+        <div className="flex flex-col items-center gap-4 rounded-xl border border-dashed border-zinc-200 px-6 py-16 text-center dark:border-zinc-800">
+          <Building2
+            className="h-8 w-8 text-zinc-300 dark:text-zinc-700"
+            aria-hidden="true"
+          />
+          <div className="flex flex-col gap-1">
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+              Nenhum fornecedor ainda
+            </p>
+            <p className="max-w-md text-sm text-zinc-500 dark:text-zinc-400">
+              Cadastre o primeiro fornecedor pra começar a indexar catálogos.
+            </p>
+          </div>
+          <CreateSupplierDialog triggerLabel="Adicionar primeiro fornecedor" />
+        </div>
       ) : (
         <Table>
           <TableHeader>
@@ -42,12 +62,12 @@ export default async function FornecedoresPage() {
                 <TableCell>
                   <Link
                     href={`/fornecedores/${s.id}`}
-                    className="font-medium hover:underline"
+                    className="font-medium hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
                   >
                     {s.name}
                   </Link>
                 </TableCell>
-                <TableCell className="text-right">
+                <TableCell className="text-right tabular-nums">
                   {s._count.catalogs}
                 </TableCell>
                 <TableCell className="text-muted-foreground">

@@ -1,12 +1,11 @@
 import { notFound } from "next/navigation";
-import Link from "next/link";
 import Image from "next/image";
 import { prisma } from "@/lib/prisma";
 import { Badge } from "@/components/ui/badge";
 import { AutoRefresh } from "@/components/auto-refresh";
-import { DeleteCatalogButton } from "@/components/delete-catalog-button";
-import { ReprocessCatalogButton } from "@/components/reprocess-catalog-button";
+import { CatalogActionsMenu } from "@/components/catalog-actions-menu";
 import { CatalogHealthPanel } from "@/components/catalog-health-panel";
+import { Breadcrumb } from "@/components/breadcrumb";
 import { getCatalogHealth } from "@/server/services/catalog-health";
 
 type Props = { params: Promise<{ catalogId: string }> };
@@ -95,39 +94,32 @@ export default async function CatalogPage({ params }: Props) {
   }
 
   return (
-    <main className="mx-auto flex max-w-6xl flex-col gap-8 p-6">
+    <main className="mx-auto flex max-w-screen-xl flex-col gap-8 px-4 py-10 md:px-6">
       {catalog.status === "PROCESSING" && <AutoRefresh intervalMs={5000} />}
 
-      {/* Breadcrumb + title */}
-      <div className="flex flex-col gap-1">
-        <p className="text-muted-foreground text-sm">
-          <Link href="/fornecedores" className="hover:underline">
-            Fornecedores
-          </Link>
-          {" / "}
-          <Link
-            href={`/fornecedores/${catalog.supplier.id}`}
-            className="hover:underline"
-          >
-            {catalog.supplier.name}
-          </Link>
-          {" / "}
-          {catalog.fileName}
-        </p>
+      <div className="flex flex-col gap-2">
+        <Breadcrumb
+          items={[
+            { label: "Fornecedores", href: "/fornecedores" },
+            {
+              label: catalog.supplier.name,
+              href: `/fornecedores/${catalog.supplier.id}`,
+            },
+            { label: catalog.fileName },
+          ]}
+        />
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-3xl font-semibold">{catalog.fileName}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {catalog.fileName}
+          </h1>
           <Badge variant={statusVariant[catalog.status]}>
             {statusLabel[catalog.status]}
           </Badge>
-          <div className="ml-auto flex gap-2">
-            {catalog.status === "READY" && (
-              <ReprocessCatalogButton
-                catalogId={catalogId}
-                hasPdf={!!catalog.pdfStoragePath}
-              />
-            )}
-            <DeleteCatalogButton
+          <div className="ml-auto">
+            <CatalogActionsMenu
               catalogId={catalogId}
+              fileName={catalog.fileName}
+              hasPdf={!!catalog.pdfStoragePath}
               redirectTo={`/fornecedores/${catalog.supplier.id}`}
             />
           </div>
