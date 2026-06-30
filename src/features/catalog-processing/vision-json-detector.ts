@@ -51,6 +51,29 @@ function getVisionJpegQuality(): number {
   return n;
 }
 
+// Base URL for the OpenAI-compatible endpoint. Defaults to OpenAI proper,
+// but pointing it at LM Studio (http://localhost:1234), Ollama
+// (http://localhost:11434), or any other OpenAI-API-compatible local
+// runtime lets the same code path run against a local model with zero IA
+// cost. The provider must still be set to "openai" — the shape of the
+// request body is what matters, not the destination host.
+function getOpenAIBaseUrl(): string {
+  const raw = process.env.VISION_DETECTOR_BASE_URL?.trim();
+  if (!raw) return "https://api.openai.com";
+  return raw.replace(/\/$/, "");
+}
+
+// Local LLMs are slow (10-60s/page typical). The default 120s timeout was
+// fine for a hosted API but starves out a local Qwen2.5-VL run on a mid
+// GPU. Bumpable via env without touching the code.
+function getVisionTimeoutMs(): number {
+  const raw = process.env.VISION_DETECTOR_TIMEOUT_MS;
+  if (!raw) return 120_000;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 5_000) return 120_000;
+  return n;
+}
+
 // ── prepareVisionInputImage ─────────────────────────────────────────────────
 //
 // Downscales the page to a JPEG and reports the scale factors so the caller
@@ -198,7 +221,7 @@ async function callAnthropic(args: {
         ],
       }),
     },
-    120_000
+    getVisionTimeoutMs()
   );
 
   if (!res.ok) {
@@ -239,18 +262,28 @@ async function callOpenAI(args: {
   maxTokens: number;
 }): Promise<ProviderCallResult> {
   const dataUrl = `data:${args.mediaType};base64,${args.imageBase64}`;
+  const baseUrl = getOpenAIBaseUrl();
+  const isLocal = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i.test(
+    baseUrl
+  );
   const res = await fetchWithTimeout(
-    "https://api.openai.com/v1/chat/completions",
+    `${baseUrl}/v1/chat/completions`,
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${args.apiKey}`,
+        // LM Studio / Ollama / llama-server ignore the key but expect the
+        // header to exist. A non-empty placeholder keeps them happy.
+        Authorization: `Bearer ${args.apiKey || "local"}`,
         "content-type": "application/json",
       },
       body: JSON.stringify({
         model: args.model,
         max_completion_tokens: args.maxTokens,
-        response_format: { type: "json_object" },
+        // OpenAI guarantees JSON mode; local runtimes vary. Skip the hint
+        // when targeting localhost so a runtime that doesn't recognize it
+        // (older llama.cpp builds, some Ollama versions) doesn't 400. The
+        // caller's parser already extracts JSON from prose / code fences.
+        ...(isLocal ? {} : { response_format: { type: "json_object" } }),
         messages: [
           {
             role: "user",
@@ -262,7 +295,7 @@ async function callOpenAI(args: {
         ],
       }),
     },
-    120_000
+    getVisionTimeoutMs()
   );
 
   if (!res.ok) {
