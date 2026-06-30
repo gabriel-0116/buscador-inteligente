@@ -17,6 +17,12 @@ import {
   generateTextEmbeddings,
   toPgVectorLiteral,
 } from "@/features/semantic-search/text-embeddings";
+import {
+  computePageTextHash,
+  copyMentionsFromPage,
+  findDuplicatePage,
+  loadDedupConfig,
+} from "./page-dedup";
 
 // ── Public entry point ──────────────────────────────────────────────────────
 //
@@ -36,9 +42,11 @@ export async function processCatalog(
       where: { id: catalogId },
       select: {
         fileName: true,
+        supplierId: true,
         supplier: { select: { name: true } },
       },
     });
+    const supplierId = catalogRow?.supplierId;
     const supplierName = catalogRow?.supplier?.name;
     const catalogFileName = catalogRow?.fileName;
 
@@ -86,6 +94,7 @@ export async function processCatalog(
 
     await processInPageMentionsMode({
       catalogId,
+      supplierId,
       renderedPages,
       layoutByPage,
       supplierName,
@@ -114,13 +123,20 @@ export async function processCatalog(
 
 async function processInPageMentionsMode(args: {
   catalogId: string;
+  supplierId: string | undefined;
   renderedPages: Array<{ pageNumber: number; imagePath: string }>;
   layoutByPage: Map<number, PdfLayoutPage>;
   supplierName: string | undefined;
   catalogFileName: string | undefined;
 }): Promise<void> {
-  const { catalogId, renderedPages, layoutByPage, supplierName, catalogFileName } =
-    args;
+  const {
+    catalogId,
+    supplierId,
+    renderedPages,
+    layoutByPage,
+    supplierName,
+    catalogFileName,
+  } = args;
 
   const analyzerReady = isPageAnalyzerConfigured();
   if (!analyzerReady) {
@@ -129,9 +145,19 @@ async function processInPageMentionsMode(args: {
     );
   }
 
+  const dedupConfig = loadDedupConfig();
+  const dedupActive = dedupConfig.enabled && !!supplierId;
+  if (dedupConfig.enabled && !supplierId) {
+    console.warn(
+      `[catalog ${catalogId}] dedup disabled: catalog has no supplierId.`
+    );
+  }
+
   let pageCount = 0;
   let mentionCount = 0;
   let analyzedPages = 0;
+  let dedupedPages = 0;
+  let dedupedMentionCount = 0;
   let emptyPages = 0;
   let analyzerErrorCount = 0;
   let embeddingErrorCount = 0;
@@ -167,20 +193,17 @@ async function processInPageMentionsMode(args: {
       pageCount++;
 
       // ── Full-page DINOv2 visual embedding ────────────────────────────────
-      // Supports the hybrid visual signal in /api/search. Failure here must
-      // never abort the page: visual-only matches can't promote to high
-      // confidence anyway (the reranker enforces that), so a missing
-      // visualEmbedding just means this page is invisible to the visual
-      // branch.
+      // Supports the hybrid visual signal in /api/search AND the page-dedup
+      // gate below. Failure here must never abort the page: visual-only
+      // matches can't promote to high confidence anyway (the reranker
+      // enforces that), so a missing visualEmbedding just means this page
+      // is invisible to the visual branch and can't be deduped.
+      let pageVisualEmbedding: number[] | null = null;
       try {
-        const pageVisualEmbedding = await generateImageEmbeddingFromPath(
-          imagePath
-        );
-        if (
-          pageVisualEmbedding.length > 0 &&
-          pageVisualEmbedding.some((v) => v !== 0)
-        ) {
-          const vec = toPgVectorLiteral(pageVisualEmbedding);
+        const emb = await generateImageEmbeddingFromPath(imagePath);
+        if (emb.length > 0 && emb.some((v) => v !== 0)) {
+          pageVisualEmbedding = emb;
+          const vec = toPgVectorLiteral(emb);
           await prisma.$executeRaw`
             UPDATE "CatalogPage"
             SET "visualEmbedding" = ${vec}::vector
@@ -196,10 +219,73 @@ async function processInPageMentionsMode(args: {
         );
       }
 
+      // ── Page layout / PDF text — used by both dedup and analyzer ─────────
+      const pageLayout = layoutByPage.get(pageNumber);
+      const pdfTextHash = computePageTextHash(pageLayout);
+
+      // ── Dedup gate ───────────────────────────────────────────────────────
+      // Cheapest possible question: do we already have an analyzed page from
+      // this supplier with the same look + same text? If yes, copy its
+      // mentions verbatim and skip the paid analyzer.
+      if (dedupActive && supplierId) {
+        try {
+          const decision = await findDuplicatePage({
+            config: dedupConfig,
+            supplierId,
+            excludeCatalogId: catalogId,
+            pageEmbedding: pageVisualEmbedding,
+            pageTextHash: pdfTextHash,
+          });
+          if (decision.matched) {
+            const copied = await copyMentionsFromPage({
+              sourcePageId: decision.source.sourcePageId,
+              targetPageId: catalogPage.id,
+              targetCatalogId: catalogId,
+              targetPageNumber: pageNumber,
+            });
+            await prisma.pageAnalysis.create({
+              data: {
+                catalogId,
+                pageId: catalogPage.id,
+                pageNumber,
+                provider: "dedup",
+                model: "dedup",
+                productsCount: copied,
+                rawJson: {
+                  products: [],
+                  _meta: {
+                    pdfTextHash,
+                    _dedup: {
+                      sourcePageId: decision.source.sourcePageId,
+                      sourceCatalogId: decision.source.sourceCatalogId,
+                      similarity: decision.source.similarity,
+                      textHashMatched:
+                        pdfTextHash !== null &&
+                        decision.source.pdfTextHash !== null,
+                    },
+                  },
+                } as Prisma.InputJsonValue,
+              },
+            });
+            console.log(
+              `[catalog ${catalogId}] page ${pageNumber} DEDUPED from ${decision.source.sourcePageId} (sim=${decision.source.similarity.toFixed(4)}, copied ${copied} mentions)`
+            );
+            dedupedPages++;
+            dedupedMentionCount += copied;
+            mentionCount += copied;
+            continue;
+          }
+        } catch (err) {
+          console.error(
+            `[catalog ${catalogId}] page ${pageNumber} dedup error (falling back to analyzer):`,
+            err
+          );
+        }
+      }
+
       if (!analyzerReady) continue;
 
       // ── Analyze page ─────────────────────────────────────────────────────
-      const pageLayout = layoutByPage.get(pageNumber);
       const pdfTextBlocks = pageLayout
         ? pageLayout.blocks
             .filter((b) => b.type === "text" && typeof b.text === "string")
@@ -259,6 +345,16 @@ async function processInPageMentionsMode(args: {
       );
 
       // ── Persist raw analysis (for auditing) ──────────────────────────────
+      // The `_meta.pdfTextHash` field is what page-dedup reads on future
+      // weekly reprints to short-circuit this analyzer call. Keep it shallow
+      // and stable — adding a sibling key under `_meta` doesn't disturb the
+      // analyzer's own JSON shape.
+      const rawWithMeta: Prisma.InputJsonValue = {
+        ...((analyzerResult.rawJson as Record<string, unknown> | null) ?? {
+          products: [],
+        }),
+        _meta: { pdfTextHash },
+      } as Prisma.InputJsonValue;
       try {
         await prisma.pageAnalysis.create({
           data: {
@@ -268,9 +364,7 @@ async function processInPageMentionsMode(args: {
             provider: analyzerResult.provider,
             model: analyzerResult.model,
             productsCount: products.length,
-            rawJson: (analyzerResult.rawJson ?? {
-              products: [],
-            }) as Prisma.InputJsonValue,
+            rawJson: rawWithMeta,
           },
         });
       } catch (err) {
@@ -366,11 +460,13 @@ async function processInPageMentionsMode(args: {
 
   // If every page failed at the analyzer, treat the run as a hard failure —
   // there's nothing to search against. Throw so the outer catch flips status
-  // to FAILED with the same error message.
+  // to FAILED with the same error message. Deduped pages count as success
+  // here: they carry mentions copied from a sibling catalog.
   if (
     analyzerReady &&
     renderedPages.length > 0 &&
     analyzedPages === 0 &&
+    dedupedPages === 0 &&
     analyzerErrorCount > 0
   ) {
     throw new Error(
@@ -417,7 +513,7 @@ async function processInPageMentionsMode(args: {
   });
 
   console.log(
-    `[catalog ${catalogId}] summary(page_mentions): totalPages=${pageCount} analyzedPages=${analyzedPages} emptyPages=${emptyPages} mentions=${mentionCount} embeddedMentions=${embeddedMentionCount} pageVisualEmbeddings=${pageVisualEmbeddingCount} analyzerErrors=${analyzerErrorCount} embeddingErrors=${embeddingErrorCount} pageVisualEmbeddingErrors=${pageVisualEmbeddingErrorCount}`
+    `[catalog ${catalogId}] summary(page_mentions): totalPages=${pageCount} analyzedPages=${analyzedPages} dedupedPages=${dedupedPages} dedupedMentions=${dedupedMentionCount} emptyPages=${emptyPages} mentions=${mentionCount} embeddedMentions=${embeddedMentionCount} pageVisualEmbeddings=${pageVisualEmbeddingCount} analyzerErrors=${analyzerErrorCount} embeddingErrors=${embeddingErrorCount} pageVisualEmbeddingErrors=${pageVisualEmbeddingErrorCount}`
   );
 }
 
