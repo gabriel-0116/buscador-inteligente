@@ -122,7 +122,7 @@ model PageProductMention {
   evidenceSource String?
 
   searchText String
-  embedding  Unsupported("vector(1536)")?
+  embedding  Unsupported("vector(768)")?
 
   rawJson   Json?
   createdAt DateTime @default(now())

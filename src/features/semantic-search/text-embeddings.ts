@@ -1,11 +1,15 @@
 // Text/semantic embeddings for PageProductMention and image query profiles.
 //
-// The schema column is `vector(1536)` (default OpenAI text-embedding-3-small).
-// Override `TEXT_EMBEDDING_DIMENSIONS` AND the schema together if changing.
+// The schema column is `vector(768)` after the 2026-07 migration off OpenAI
+// text-embedding-3-small onto a local runtime (LM Studio /
+// nomic-embed-text-v1.5 as the reference). Setting TEXT_EMBEDDING_BASE_URL
+// to an empty string reverts to the hosted OpenAI endpoint; in that case
+// bump TEXT_EMBEDDING_MODEL back to text-embedding-3-small and pair with a
+// matching schema migration (there is no in-place cast between dimensions).
 
 const DEFAULT_PROVIDER = "openai";
-const DEFAULT_OPENAI_MODEL = "text-embedding-3-small";
-const DEFAULT_DIMENSIONS = 1536;
+const DEFAULT_OPENAI_MODEL = "nomic-embed-text-v1.5";
+const DEFAULT_DIMENSIONS = 768;
 
 export class TextEmbeddingUnavailableError extends Error {
   constructor(message: string) {
@@ -46,11 +50,32 @@ function getApiKey(): string {
     process.env.OPENAI_API_KEY ||
     process.env.VISION_DETECTOR_API_KEY;
   if (!key) {
+    // Local OpenAI-compatible runtimes (LM Studio, Ollama, llama-server)
+    // ignore the bearer entirely but require the header to exist. When the
+    // caller is going local (base URL points at localhost) there's no
+    // real credential to demand, so fall back to a placeholder instead of
+    // throwing.
+    if (isLocalBaseUrl(getOpenAiBaseUrl())) return "local";
     throw new TextEmbeddingUnavailableError(
       "TEXT_EMBEDDING_API_KEY (or OPENAI_API_KEY / VISION_DETECTOR_API_KEY) must be set"
     );
   }
   return key;
+}
+
+// Base URL for the OpenAI-compatible embeddings endpoint. Empty / unset
+// defaults to hosted OpenAI. Point at http://localhost:1234 to route
+// through LM Studio, http://localhost:11434 for Ollama, etc.
+function getOpenAiBaseUrl(): string {
+  const raw = process.env.TEXT_EMBEDDING_BASE_URL?.trim();
+  if (!raw) return "https://api.openai.com";
+  return raw.replace(/\/$/, "");
+}
+
+function isLocalBaseUrl(baseUrl: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])/i.test(
+    baseUrl
+  );
 }
 
 function normalizeVector(v: number[]): number[] {
@@ -81,18 +106,25 @@ async function generateOpenAiEmbedding(args: {
   dimensions: number;
   inputs: string[];
 }): Promise<number[][]> {
+  const baseUrl = getOpenAiBaseUrl();
+  const local = isLocalBaseUrl(baseUrl);
   const res = await fetchWithTimeout(
-    "https://api.openai.com/v1/embeddings",
+    `${baseUrl}/v1/embeddings`,
     {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${args.apiKey}`,
+        Authorization: `Bearer ${args.apiKey || "local"}`,
         "content-type": "application/json",
       },
+      // OpenAI supports `dimensions` (Matryoshka truncation) on
+      // text-embedding-3-*. Local runtimes usually 400 on unknown fields,
+      // and the model dimension is fixed anyway — omit the field when
+      // targeting localhost. We still validate the response matches the
+      // configured dimension on both paths.
       body: JSON.stringify({
         model: args.model,
         input: args.inputs,
-        dimensions: args.dimensions,
+        ...(local ? {} : { dimensions: args.dimensions }),
       }),
     },
     60_000
@@ -100,7 +132,7 @@ async function generateOpenAiEmbedding(args: {
   if (!res.ok) {
     const body = await res.text();
     throw new TextEmbeddingUnavailableError(
-      `OpenAI embeddings ${res.status}: ${body.slice(0, 500)}`
+      `Embeddings API ${res.status}: ${body.slice(0, 500)}`
     );
   }
   const json = (await res.json()) as {
@@ -113,7 +145,7 @@ async function generateOpenAiEmbedding(args: {
     const embedding = row.embedding ?? [];
     if (embedding.length !== args.dimensions) {
       throw new TextEmbeddingUnavailableError(
-        `OpenAI returned ${embedding.length} dims, expected ${args.dimensions}`
+        `Embedding provider returned ${embedding.length} dims, expected ${args.dimensions} (check TEXT_EMBEDDING_DIMENSIONS matches the model)`
       );
     }
     return normalizeVector(embedding);
