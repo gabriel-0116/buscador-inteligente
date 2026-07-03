@@ -31,7 +31,18 @@ const trimmedNonEmpty = z
   .transform((s) => s.trim())
   .pipe(z.string().min(1));
 
-const optionalString = trimmedNonEmpty.optional().nullable();
+// Local LLMs (Qwen2.5-VL, MiniCPM-V, …) often emit "" instead of null when a
+// field is unknown, unlike the hosted OpenAI/Anthropic models this schema
+// was originally shaped for. Coerce "" / whitespace-only into null so an
+// otherwise-valid page doesn't get rejected wholesale for a couple of empty
+// strings.
+const optionalString = z
+  .union([z.string(), z.null(), z.undefined()])
+  .transform((v) => {
+    if (v === null || v === undefined) return null;
+    const trimmed = v.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  });
 
 // Always returns a normalized string[] — even if the model sent a string or null.
 const stringArray = z
